@@ -2,10 +2,45 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { execSync } from 'child_process';
 
 const HOME = os.homedir();
 const NAMES_FILE = path.join(HOME, '.claude', 'session-names.json');
 const PROJECTS_DIR = path.join(HOME, '.claude', 'projects');
+
+// ---- Claude binary detection ----
+
+function findClaudeBinary(): string {
+  // 1. Check VS Code settings
+  const config = vscode.workspace.getConfiguration('claudeSessionManager');
+  const configured = config.get<string>('claudePath');
+  if (configured && fs.existsSync(configured)) {
+    return configured;
+  }
+
+  // 2. Try `which claude`
+  try {
+    const result = execSync('which claude', { encoding: 'utf-8', timeout: 3000 }).trim();
+    if (result && fs.existsSync(result)) {
+      return result;
+    }
+  } catch { /* not in PATH */ }
+
+  // 3. Check common installation paths
+  const commonPaths = [
+    '/opt/homebrew/bin/claude',
+    '/usr/local/bin/claude',
+    path.join(HOME, '.local/bin/claude'),
+  ];
+  for (const p of commonPaths) {
+    if (fs.existsSync(p)) {
+      return p;
+    }
+  }
+
+  // 4. Fallback — hope it's in VS Code's terminal PATH
+  return 'claude';
+}
 
 interface SessionNames {
   [sessionId: string]: { name: string; title: string };
@@ -235,8 +270,7 @@ async function cmdRenameSession(arg: SessionArg): Promise<void> {
 }
 
 async function cmdResumeSession(arg: SessionArg): Promise<void> {
-  // Use full path — VS Code terminal may not have homebrew in PATH
-  const claudePath = '/opt/homebrew/bin/claude';
+  const claudePath = findClaudeBinary();
   const cmd = `${claudePath} --resume ${arg.sessionId}`;
   const label = arg.name || arg.title.slice(0, 40);
   const terminal = vscode.window.createTerminal(`Claude: ${label}`);

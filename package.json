@@ -1,10 +1,25 @@
 {
   "name": "claude-session-manager",
   "displayName": "Claude Session Manager",
-  "description": "Named conversation manager for Claude Code — save, name, and switch between sessions",
+  "description": "Named conversation manager for Claude Code — save, name, and resume sessions from a sidebar panel",
   "version": "1.0.0",
   "publisher": "conglyu",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/conglyu/claude-session-manager"
+  },
+  "bugs": {
+    "url": "https://github.com/conglyu/claude-session-manager/issues"
+  },
+  "keywords": [
+    "claude-code",
+    "claude",
+    "session",
+    "conversation",
+    "productivity"
+  ],
+  "icon": "resources/icon.png",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -17,6 +32,16 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "configuration": {
+      "title": "Claude Session Manager",
+      "properties": {
+        "claudeSessionManager.claudePath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the claude CLI binary. Auto-detected if empty (checks: VS Code terminal PATH → Homebrew → /usr/local)."
+        }
+      }
+    },
     "viewsContainers": {
       "activitybar": [
         {
