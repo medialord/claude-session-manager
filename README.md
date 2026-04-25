@@ -2,8 +2,6 @@
 
 VS Code extension for managing [Claude Code](https://claude.ai/code) CLI sessions. Name your conversations and switch between them from a sidebar — no more `/resume` hunting.
 
-![screenshot](resources/screenshot.png)
-
 ## Features
 
 - **Named Sessions** — give your important conversations memorable names
