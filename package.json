@@ -1,0 +1,138 @@
+{
+  "name": "claude-session-manager",
+  "displayName": "Claude Session Manager",
+  "description": "Named conversation manager for Claude Code — save, name, and switch between sessions",
+  "version": "1.0.0",
+  "publisher": "conglyu",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:claudeSessionsNamed",
+    "onView:claudeSessionsRecent"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claude-sessions",
+          "title": "Claude Sessions",
+          "icon": "$(comment-discussion)"
+        }
+      ]
+    },
+    "views": {
+      "claude-sessions": [
+        {
+          "id": "claudeSessionsNamed",
+          "name": "Named Sessions",
+          "contextualTitle": "Named Sessions"
+        },
+        {
+          "id": "claudeSessionsRecent",
+          "name": "Recent Sessions",
+          "contextualTitle": "Recent Sessions"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "claude-sessions.refresh",
+        "title": "Refresh Sessions",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "claude-sessions.nameSession",
+        "title": "Name This Session",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "claude-sessions.renameSession",
+        "title": "Rename Session",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "claude-sessions.resumeSession",
+        "title": "Resume Session",
+        "icon": "$(play)"
+      },
+      {
+        "command": "claude-sessions.deleteName",
+        "title": "Remove Name",
+        "icon": "$(close)"
+      },
+      {
+        "command": "claude-sessions.copyResumeCommand",
+        "title": "Copy Resume Command",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "claude-sessions.openSessionFolder",
+        "title": "Open Session File",
+        "icon": "$(folder-opened)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "claude-sessions.refresh",
+          "when": "view == claudeSessionsNamed || view == claudeSessionsRecent",
+          "group": "navigation"
+        },
+        {
+          "command": "claude-sessions.nameSession",
+          "when": "view == claudeSessionsRecent",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "claude-sessions.resumeSession",
+          "when": "view == claudeSessionsNamed || view == claudeSessionsRecent",
+          "group": "inline"
+        },
+        {
+          "command": "claude-sessions.renameSession",
+          "when": "view == claudeSessionsNamed",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claude-sessions.nameSession",
+          "when": "view == claudeSessionsRecent",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claude-sessions.deleteName",
+          "when": "view == claudeSessionsNamed",
+          "group": "navigation@2"
+        },
+        {
+          "command": "claude-sessions.copyResumeCommand",
+          "when": "view == claudeSessionsNamed || view == claudeSessionsRecent",
+          "group": "navigation@3"
+        },
+        {
+          "command": "claude-sessions.openSessionFolder",
+          "when": "view == claudeSessionsNamed || view == claudeSessionsRecent",
+          "group": "navigation@4"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package",
+    "install-extension": "code --install-extension claude-session-manager-1.0.0.vsix"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0"
+  }
+}
