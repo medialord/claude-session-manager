@@ -1,8 +1,8 @@
 {
   "name": "claude-session-manager",
   "displayName": "Claude Session Manager",
-  "description": "Named conversation manager for Claude Code — save, name, and resume sessions from a sidebar panel",
-  "version": "1.0.0",
+  "description": "Named session manager for Claude Code and Codex CLI — save, name, and resume sessions from a sidebar panel",
+  "version": "1.1.0",
   "publisher": "conglyu",
   "license": "MIT",
   "repository": {
@@ -15,6 +15,8 @@
   "keywords": [
     "claude-code",
     "claude",
+    "codex",
+    "openai",
     "session",
     "conversation",
     "productivity"
@@ -28,7 +30,9 @@
   ],
   "activationEvents": [
     "onView:claudeSessionsNamed",
-    "onView:claudeSessionsRecent"
+    "onView:claudeSessionsRecent",
+    "onView:codexSessionsNamed",
+    "onView:codexSessionsRecent"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -39,6 +43,11 @@
           "type": "string",
           "default": "",
           "description": "Path to the claude CLI binary. Auto-detected if empty (checks: VS Code terminal PATH → Homebrew → /usr/local)."
+        },
+        "claudeSessionManager.codexPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the codex CLI binary. Auto-detected if empty (checks: VS Code terminal PATH → Homebrew → /usr/local)."
         }
       }
     },
@@ -46,7 +55,7 @@
       "activitybar": [
         {
           "id": "claude-sessions",
-          "title": "Claude Sessions",
+          "title": "AI Sessions",
           "icon": "$(comment-discussion)"
         }
       ]
@@ -55,13 +64,23 @@
       "claude-sessions": [
         {
           "id": "claudeSessionsNamed",
-          "name": "Named Sessions",
-          "contextualTitle": "Named Sessions"
+          "name": "Claude · Named",
+          "contextualTitle": "Claude · Named"
         },
         {
           "id": "claudeSessionsRecent",
-          "name": "Recent Sessions",
-          "contextualTitle": "Recent Sessions"
+          "name": "Claude · Recent",
+          "contextualTitle": "Claude · Recent"
+        },
+        {
+          "id": "codexSessionsNamed",
+          "name": "Codex · Named",
+          "contextualTitle": "Codex · Named"
+        },
+        {
+          "id": "codexSessionsRecent",
+          "name": "Codex · Recent",
+          "contextualTitle": "Codex · Recent"
         }
       ]
     },
@@ -74,6 +93,11 @@
       {
         "command": "claude-sessions.nameSession",
         "title": "Name This Session",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "claude-sessions.nameSessionCodex",
+        "title": "Name This Codex Session",
         "icon": "$(edit)"
       },
       {
@@ -106,44 +130,49 @@
       "view/title": [
         {
           "command": "claude-sessions.refresh",
-          "when": "view == claudeSessionsNamed || view == claudeSessionsRecent",
+          "when": "view == claudeSessionsNamed || view == claudeSessionsRecent || view == codexSessionsNamed || view == codexSessionsRecent",
           "group": "navigation"
         },
         {
           "command": "claude-sessions.nameSession",
           "when": "view == claudeSessionsRecent",
+          "group": "navigation"
+        },
+        {
+          "command": "claude-sessions.nameSessionCodex",
+          "when": "view == codexSessionsRecent",
           "group": "navigation"
         }
       ],
       "view/item/context": [
         {
           "command": "claude-sessions.resumeSession",
-          "when": "view == claudeSessionsNamed || view == claudeSessionsRecent",
+          "when": "viewItem == named-claude || viewItem == unnamed-claude || viewItem == named-codex || viewItem == unnamed-codex",
           "group": "inline"
         },
         {
           "command": "claude-sessions.renameSession",
-          "when": "view == claudeSessionsNamed",
+          "when": "viewItem == named-claude || viewItem == named-codex",
           "group": "navigation@1"
         },
         {
           "command": "claude-sessions.nameSession",
-          "when": "view == claudeSessionsRecent",
+          "when": "viewItem == unnamed-claude || viewItem == unnamed-codex",
           "group": "navigation@1"
         },
         {
           "command": "claude-sessions.deleteName",
-          "when": "view == claudeSessionsNamed",
+          "when": "viewItem == named-claude || viewItem == named-codex",
           "group": "navigation@2"
         },
         {
           "command": "claude-sessions.copyResumeCommand",
-          "when": "view == claudeSessionsNamed || view == claudeSessionsRecent",
+          "when": "viewItem == named-claude || viewItem == unnamed-claude || viewItem == named-codex || viewItem == unnamed-codex",
           "group": "navigation@3"
         },
         {
           "command": "claude-sessions.openSessionFolder",
-          "when": "view == claudeSessionsNamed || view == claudeSessionsRecent",
+          "when": "viewItem == named-claude || viewItem == unnamed-claude || viewItem == named-codex || viewItem == unnamed-codex",
           "group": "navigation@4"
         }
       ]
@@ -153,7 +182,7 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "package": "vsce package",
-    "install-extension": "code --install-extension claude-session-manager-1.0.0.vsix"
+    "install-extension": "code --install-extension claude-session-manager-1.1.0.vsix"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",

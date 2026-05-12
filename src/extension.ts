@@ -6,31 +6,32 @@ import { execSync } from 'child_process';
 
 const HOME = os.homedir();
 const NAMES_FILE = path.join(HOME, '.claude', 'session-names.json');
-const PROJECTS_DIR = path.join(HOME, '.claude', 'projects');
+const CLAUDE_PROJECTS_DIR = path.join(HOME, '.claude', 'projects');
+const CODEX_SESSIONS_DIR = path.join(HOME, '.codex', 'sessions');
 
-// ---- Claude binary detection ----
+type Tool = 'claude' | 'codex';
 
-function findClaudeBinary(): string {
-  // 1. Check VS Code settings
+// ---- Binary detection ----
+
+function findBinary(tool: Tool): string {
   const config = vscode.workspace.getConfiguration('claudeSessionManager');
-  const configured = config.get<string>('claudePath');
+  const configKey = tool === 'claude' ? 'claudePath' : 'codexPath';
+  const configured = config.get<string>(configKey);
   if (configured && fs.existsSync(configured)) {
     return configured;
   }
 
-  // 2. Try `which claude`
   try {
-    const result = execSync('which claude', { encoding: 'utf-8', timeout: 3000 }).trim();
+    const result = execSync(`which ${tool}`, { encoding: 'utf-8', timeout: 3000 }).trim();
     if (result && fs.existsSync(result)) {
       return result;
     }
   } catch { /* not in PATH */ }
 
-  // 3. Check common installation paths
   const commonPaths = [
-    '/opt/homebrew/bin/claude',
-    '/usr/local/bin/claude',
-    path.join(HOME, '.local/bin/claude'),
+    `/opt/homebrew/bin/${tool}`,
+    `/usr/local/bin/${tool}`,
+    path.join(HOME, `.local/bin/${tool}`),
   ];
   for (const p of commonPaths) {
     if (fs.existsSync(p)) {
@@ -38,29 +39,29 @@ function findClaudeBinary(): string {
     }
   }
 
-  // 4. Fallback — hope it's in VS Code's terminal PATH
-  return 'claude';
+  return tool;
 }
 
-interface SessionNames {
-  [sessionId: string]: { name: string; title: string };
-}
+interface SessionNameEntry { name: string; title: string; tool?: Tool }
+interface SessionNames { [sessionId: string]: SessionNameEntry }
 
 interface SessionInfo {
   sessionId: string;
+  tool: Tool;
   name?: string;
   title: string;
   mtime: number;
   isNamed: boolean;
+  filePath: string;
 }
 
 // ---- Data layer ----
 
-function getProjectsSubDir(): string {
-  if (!fs.existsSync(PROJECTS_DIR)) { return ''; }
-  const entries = fs.readdirSync(PROJECTS_DIR);
+function getClaudeProjectsSubDir(): string {
+  if (!fs.existsSync(CLAUDE_PROJECTS_DIR)) { return ''; }
+  const entries = fs.readdirSync(CLAUDE_PROJECTS_DIR);
   for (const e of entries) {
-    const full = path.join(PROJECTS_DIR, e);
+    const full = path.join(CLAUDE_PROJECTS_DIR, e);
     if (fs.statSync(full).isDirectory()) {
       const files = fs.readdirSync(full);
       if (files.some((f: string) => f.endsWith('.jsonl'))) {
@@ -83,11 +84,14 @@ function saveNames(names: SessionNames): void {
   fs.writeFileSync(NAMES_FILE, JSON.stringify(names, null, 2), 'utf-8');
 }
 
-function extractTitle(sessionId: string, projDir: string): string {
-  const jsonlPath = path.join(projDir, `${sessionId}.jsonl`);
-  if (!fs.existsSync(jsonlPath)) { return '(unknown)'; }
+function truncate(s: string, n = 120): string {
+  return s.length > n ? s.slice(0, n) + '\u2026' : s;
+}
+
+function extractClaudeTitle(filePath: string): string {
+  if (!fs.existsSync(filePath)) { return '(unknown)'; }
   try {
-    const content = fs.readFileSync(jsonlPath, 'utf-8');
+    const content = fs.readFileSync(filePath, 'utf-8');
     const lines = content.split('\n');
     for (const line of lines) {
       if (!line.trim()) { continue; }
@@ -99,11 +103,11 @@ function extractTitle(sessionId: string, projDir: string): string {
             if (item.type === 'text') {
               const t = item.text.trim();
               if (t.includes('<local-command')) { continue; }
-              return t.length > 120 ? t.slice(0, 120) + '\u2026' : t;
+              return truncate(t);
             }
           }
         } else if (typeof msg === 'string') {
-          return msg.length > 120 ? msg.slice(0, 120) + '\u2026' : msg;
+          return truncate(msg);
         }
         break;
       }
@@ -114,26 +118,107 @@ function extractTitle(sessionId: string, projDir: string): string {
   }
 }
 
-function getAllSessions(): SessionInfo[] {
-  const projDir = getProjectsSubDir();
-  if (!projDir) { return []; }
+function extractCodexTitle(filePath: string): string {
+  if (!fs.existsSync(filePath)) { return '(unknown)'; }
+  try {
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const lines = content.split('\n');
+    for (const line of lines) {
+      if (!line.trim()) { continue; }
+      let d: any;
+      try { d = JSON.parse(line); } catch { continue; }
+      // Prefer event_msg user_message — that's the actual user-typed input
+      if (d.type === 'event_msg' && d.payload?.type === 'user_message') {
+        const t = String(d.payload.message ?? '').trim();
+        if (!t) { continue; }
+        // Skip auto-injected AGENTS.md / instructions
+        if (t.startsWith('# AGENTS.md') || t.startsWith('<INSTRUCTIONS')) { continue; }
+        return truncate(t);
+      }
+    }
+    return '(empty)';
+  } catch {
+    return '(error)';
+  }
+}
 
+function listCodexSessionFiles(): string[] {
+  const results: string[] = [];
+  if (!fs.existsSync(CODEX_SESSIONS_DIR)) { return results; }
+  const walk = (dir: string): void => {
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) { walk(full); }
+      else if (e.isFile() && e.name.startsWith('rollout-') && e.name.endsWith('.jsonl')) {
+        results.push(full);
+      }
+    }
+  };
+  walk(CODEX_SESSIONS_DIR);
+  return results;
+}
+
+function getCodexSessionId(filePath: string): string | null {
+  try {
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const firstNewline = content.indexOf('\n');
+    const firstLine = firstNewline === -1 ? content : content.slice(0, firstNewline);
+    const meta = JSON.parse(firstLine);
+    if (meta.type === 'session_meta' && meta.payload?.id) {
+      return String(meta.payload.id);
+    }
+  } catch { /* fallthrough */ }
+  // Fallback: parse from filename: rollout-<ts>-<uuid>.jsonl
+  const m = path.basename(filePath).match(/rollout-[\dT:\-.]+-([0-9a-f-]+)\.jsonl$/);
+  return m ? m[1] : null;
+}
+
+function getAllSessions(tool: Tool): SessionInfo[] {
   const names = loadNames();
   const sessions: SessionInfo[] = [];
 
-  const files = fs.readdirSync(projDir);
-  for (const f of files) {
-    if (!f.endsWith('.jsonl')) { continue; }
-    const sessionId = f.replace('.jsonl', '');
-    const stat = fs.statSync(path.join(projDir, f));
-    const named = names[sessionId];
-    sessions.push({
-      sessionId,
-      name: named?.name,
-      title: named?.title || extractTitle(sessionId, projDir),
-      mtime: stat.mtimeMs,
-      isNamed: !!named,
-    });
+  if (tool === 'claude') {
+    const projDir = getClaudeProjectsSubDir();
+    if (!projDir) { return []; }
+    const files = fs.readdirSync(projDir);
+    for (const f of files) {
+      if (!f.endsWith('.jsonl')) { continue; }
+      const sessionId = f.replace('.jsonl', '');
+      const full = path.join(projDir, f);
+      const stat = fs.statSync(full);
+      const named = names[sessionId];
+      // Treat legacy entries (no tool field) as claude
+      const namedForTool = named && (named.tool ?? 'claude') === 'claude' ? named : undefined;
+      sessions.push({
+        sessionId,
+        tool: 'claude',
+        name: namedForTool?.name,
+        title: namedForTool?.title || extractClaudeTitle(full),
+        mtime: stat.mtimeMs,
+        isNamed: !!namedForTool,
+        filePath: full,
+      });
+    }
+  } else {
+    const files = listCodexSessionFiles();
+    for (const full of files) {
+      const sessionId = getCodexSessionId(full);
+      if (!sessionId) { continue; }
+      const stat = fs.statSync(full);
+      const named = names[sessionId];
+      const namedForTool = named && named.tool === 'codex' ? named : undefined;
+      sessions.push({
+        sessionId,
+        tool: 'codex',
+        name: namedForTool?.name,
+        title: namedForTool?.title || extractCodexTitle(full),
+        mtime: stat.mtimeMs,
+        isNamed: !!namedForTool,
+        filePath: full,
+      });
+    }
   }
 
   sessions.sort((a, b) => b.mtime - a.mtime);
@@ -150,24 +235,24 @@ class SessionItem extends vscode.TreeItem {
     const label = session.name || session.title.slice(0, 60);
     super(label, collapsibleState);
 
-    this.tooltip = `${session.name ? '\u2b50 ' + session.name + '\n\n' : ''}${session.title}\n\nID: ${session.sessionId}\nModified: ${new Date(session.mtime).toLocaleString()}`;
+    const toolBadge = session.tool === 'claude' ? 'Claude' : 'Codex';
+    this.tooltip = `${session.name ? '\u2b50 ' + session.name + '\n\n' : ''}${session.title}\n\nTool: ${toolBadge}\nID: ${session.sessionId}\nModified: ${new Date(session.mtime).toLocaleString()}`;
     this.description = new Date(session.mtime).toLocaleDateString();
 
     if (session.isNamed) {
       this.iconPath = new vscode.ThemeIcon('star-full', new vscode.ThemeColor('editorWarning.foreground'));
-      this.contextValue = 'namedSession';
+      this.contextValue = `named-${session.tool}`;
     } else {
-      this.iconPath = new vscode.ThemeIcon('comment');
-      this.contextValue = 'unnamedSession';
+      this.iconPath = new vscode.ThemeIcon(session.tool === 'claude' ? 'comment' : 'symbol-method');
+      this.contextValue = `unnamed-${session.tool}`;
     }
 
-    // Click directly opens terminal with resume command
-    // Pass plain data object — VS Code serializes arguments, can't pass class instances
     this.command = {
       command: 'claude-sessions.resumeSession',
       title: 'Resume Session',
       arguments: [{
         sessionId: session.sessionId,
+        tool: session.tool,
         name: session.name,
         title: session.title,
       }],
@@ -175,53 +260,63 @@ class SessionItem extends vscode.TreeItem {
   }
 }
 
-// ---- Tree data providers ----
+// ---- Tree data provider (parameterized) ----
 
-class NamedSessionsProvider implements vscode.TreeDataProvider<SessionItem> {
+class SessionsProvider implements vscode.TreeDataProvider<SessionItem> {
   private _onDidChangeTreeData = new vscode.EventEmitter<SessionItem | undefined>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
+
+  constructor(private readonly tool: Tool, private readonly mode: 'named' | 'recent') {}
 
   refresh(): void { this._onDidChangeTreeData.fire(undefined); }
 
   getTreeItem(element: SessionItem): vscode.TreeItem { return element; }
 
   getChildren(): SessionItem[] {
-    const all = getAllSessions();
-    const named = all.filter(s => s.isNamed);
-    return named.map(s => new SessionItem(s, vscode.TreeItemCollapsibleState.None));
-  }
-}
-
-class RecentSessionsProvider implements vscode.TreeDataProvider<SessionItem> {
-  private _onDidChangeTreeData = new vscode.EventEmitter<SessionItem | undefined>();
-  readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
-
-  refresh(): void { this._onDidChangeTreeData.fire(undefined); }
-
-  getTreeItem(element: SessionItem): vscode.TreeItem { return element; }
-
-  getChildren(): SessionItem[] {
-    const all = getAllSessions();
-    const unnamed = all.filter(s => !s.isNamed).slice(0, 30);
-    return unnamed.map(s => new SessionItem(s, vscode.TreeItemCollapsibleState.None));
+    const all = getAllSessions(this.tool);
+    const filtered = this.mode === 'named'
+      ? all.filter(s => s.isNamed)
+      : all.filter(s => !s.isNamed).slice(0, 30);
+    return filtered.map(s => new SessionItem(s, vscode.TreeItemCollapsibleState.None));
   }
 }
 
 // ---- Commands ----
 
-// Accept plain object — VS Code serializes TreeItem arguments
-type SessionArg = { sessionId: string; name?: string; title: string };
+type SessionArg = { sessionId: string; tool: Tool; name?: string; title: string };
 
-async function cmdNameSession(arg?: SessionArg): Promise<void> {
-  const all = getAllSessions();
+async function cmdNameSession(arg?: SessionArg & { tool?: Tool }): Promise<void> {
+  let tool: Tool = arg?.tool ?? 'claude';
   let targetId = arg?.sessionId;
 
   if (!targetId) {
-    const unnamed = all.filter(s => !s.isNamed).slice(0, 20);
-    if (unnamed.length === 0) {
+    // Picker: ask which tool first if both have unnamed sessions
+    const claudeUnnamed = getAllSessions('claude').filter(s => !s.isNamed);
+    const codexUnnamed = getAllSessions('codex').filter(s => !s.isNamed);
+
+    let unnamed: SessionInfo[];
+    if (claudeUnnamed.length && codexUnnamed.length) {
+      const toolPick = await vscode.window.showQuickPick(
+        [
+          { label: 'Claude', description: `${claudeUnnamed.length} unnamed sessions`, tool: 'claude' as Tool },
+          { label: 'Codex', description: `${codexUnnamed.length} unnamed sessions`, tool: 'codex' as Tool },
+        ],
+        { placeHolder: 'Pick tool' },
+      );
+      if (!toolPick) { return; }
+      tool = toolPick.tool;
+      unnamed = (tool === 'claude' ? claudeUnnamed : codexUnnamed).slice(0, 20);
+    } else if (claudeUnnamed.length) {
+      tool = 'claude';
+      unnamed = claudeUnnamed.slice(0, 20);
+    } else if (codexUnnamed.length) {
+      tool = 'codex';
+      unnamed = codexUnnamed.slice(0, 20);
+    } else {
       vscode.window.showInformationMessage('No unnamed sessions to name.');
       return;
     }
+
     const picks = unnamed.map(s => ({
       label: s.title.slice(0, 80),
       description: new Date(s.mtime).toLocaleString(),
@@ -229,7 +324,7 @@ async function cmdNameSession(arg?: SessionArg): Promise<void> {
       sessionId: s.sessionId,
     }));
     const pick = await vscode.window.showQuickPick(picks, {
-      placeHolder: 'Pick a session to name',
+      placeHolder: `Pick a ${tool} session to name`,
       matchOnDescription: true,
     });
     if (!pick) { return; }
@@ -237,15 +332,17 @@ async function cmdNameSession(arg?: SessionArg): Promise<void> {
   }
 
   const name = await vscode.window.showInputBox({
-    prompt: 'Enter a name for this session',
+    prompt: `Enter a name for this ${tool} session`,
     placeHolder: 'e.g. syncap-payment, deploy-script',
     validateInput: (v) => v.trim() ? undefined : 'Name cannot be empty',
   });
   if (!name) { return; }
 
+  const all = getAllSessions(tool);
+  const target = all.find(s => s.sessionId === targetId);
+  const title = target?.title ?? '';
   const names = loadNames();
-  const title = extractTitle(targetId, getProjectsSubDir());
-  names[targetId] = { name: name.trim(), title };
+  names[targetId] = { name: name.trim(), title, tool };
   saveNames(names);
 
   refreshAll();
@@ -263,6 +360,7 @@ async function cmdRenameSession(arg: SessionArg): Promise<void> {
   const names = loadNames();
   if (names[arg.sessionId]) {
     names[arg.sessionId].name = name.trim();
+    names[arg.sessionId].tool = arg.tool;
     saveNames(names);
     refreshAll();
     vscode.window.showInformationMessage(`Renamed to: ${name}`);
@@ -270,19 +368,26 @@ async function cmdRenameSession(arg: SessionArg): Promise<void> {
 }
 
 async function cmdResumeSession(arg: SessionArg): Promise<void> {
-  const claudePath = findClaudeBinary();
-  const cmd = `${claudePath} --resume ${arg.sessionId}`;
+  const tool: Tool = arg.tool ?? 'claude';
+  const bin = findBinary(tool);
+  const cmd = tool === 'claude'
+    ? `${bin} --resume ${arg.sessionId}`
+    : `${bin} resume ${arg.sessionId}`;
   const label = arg.name || arg.title.slice(0, 40);
-  const terminal = vscode.window.createTerminal(`Claude: ${label}`);
+  const prefix = tool === 'claude' ? 'Claude' : 'Codex';
+  const terminal = vscode.window.createTerminal(`${prefix}: ${label}`);
   terminal.show();
   terminal.sendText(cmd);
 }
 
 async function cmdCopyResumeCommand(arg: SessionArg): Promise<void> {
-  const cmd = `claude --resume ${arg.sessionId}`;
+  const tool: Tool = arg.tool ?? 'claude';
+  const cmd = tool === 'claude'
+    ? `claude --resume ${arg.sessionId}`
+    : `codex resume ${arg.sessionId}`;
   await vscode.env.clipboard.writeText(cmd);
   vscode.window.showInformationMessage(
-    `Copied: claude --resume ${arg.sessionId.slice(0, 8)}...`
+    `Copied: ${cmd.slice(0, 40)}...`
   );
 }
 
@@ -303,38 +408,43 @@ async function cmdDeleteName(arg: SessionArg): Promise<void> {
 }
 
 async function cmdOpenSession(arg: SessionArg): Promise<void> {
-  const projDir = getProjectsSubDir();
-  const jsonlPath = path.join(projDir, `${arg.sessionId}.jsonl`);
-  if (fs.existsSync(jsonlPath)) {
-    const doc = await vscode.workspace.openTextDocument(jsonlPath);
+  const tool: Tool = arg.tool ?? 'claude';
+  const all = getAllSessions(tool);
+  const target = all.find(s => s.sessionId === arg.sessionId);
+  if (target && fs.existsSync(target.filePath)) {
+    const doc = await vscode.workspace.openTextDocument(target.filePath);
     await vscode.window.showTextDocument(doc);
   } else {
-    vscode.window.showErrorMessage('Session file not found: ' + jsonlPath);
+    vscode.window.showErrorMessage(`Session file not found for ${tool}: ${arg.sessionId}`);
   }
 }
 
 // ---- Globals ----
 
-let namedProvider: NamedSessionsProvider;
-let recentProvider: RecentSessionsProvider;
+let providers: SessionsProvider[] = [];
 
 function refreshAll(): void {
-  namedProvider.refresh();
-  recentProvider.refresh();
+  for (const p of providers) { p.refresh(); }
 }
 
 // ---- Activation ----
 
 export function activate(context: vscode.ExtensionContext): void {
-  namedProvider = new NamedSessionsProvider();
-  recentProvider = new RecentSessionsProvider();
+  const claudeNamed = new SessionsProvider('claude', 'named');
+  const claudeRecent = new SessionsProvider('claude', 'recent');
+  const codexNamed = new SessionsProvider('codex', 'named');
+  const codexRecent = new SessionsProvider('codex', 'recent');
+  providers = [claudeNamed, claudeRecent, codexNamed, codexRecent];
 
-  vscode.window.registerTreeDataProvider('claudeSessionsNamed', namedProvider);
-  vscode.window.registerTreeDataProvider('claudeSessionsRecent', recentProvider);
+  vscode.window.registerTreeDataProvider('claudeSessionsNamed', claudeNamed);
+  vscode.window.registerTreeDataProvider('claudeSessionsRecent', claudeRecent);
+  vscode.window.registerTreeDataProvider('codexSessionsNamed', codexNamed);
+  vscode.window.registerTreeDataProvider('codexSessionsRecent', codexRecent);
 
   context.subscriptions.push(
     vscode.commands.registerCommand('claude-sessions.refresh', refreshAll),
     vscode.commands.registerCommand('claude-sessions.nameSession', cmdNameSession),
+    vscode.commands.registerCommand('claude-sessions.nameSessionCodex', () => cmdNameSession({ tool: 'codex' } as any)),
     vscode.commands.registerCommand('claude-sessions.renameSession', cmdRenameSession),
     vscode.commands.registerCommand('claude-sessions.resumeSession', cmdResumeSession),
     vscode.commands.registerCommand('claude-sessions.copyResumeCommand', cmdCopyResumeCommand),
