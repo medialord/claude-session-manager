@@ -420,10 +420,9 @@ async function cmdOpenSession(arg: SessionArg): Promise<void> {
 
 async function cmdSwitchTool(): Promise<void> {
   await setActiveTool(activeTool === 'claude' ? 'codex' : 'claude');
+  const label = activeTool === 'claude' ? 'Claude' : 'Codex';
+  vscode.window.setStatusBarMessage(`Switched to ${label}`, 2000);
 }
-
-async function cmdUseClaude(): Promise<void> { await setActiveTool('claude'); }
-async function cmdUseCodex(): Promise<void> { await setActiveTool('codex'); }
 
 // ---- Activation ----
 
@@ -452,8 +451,6 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('claude-sessions.deleteName', cmdDeleteName),
     vscode.commands.registerCommand('claude-sessions.openSessionFolder', cmdOpenSession),
     vscode.commands.registerCommand('claude-sessions.switchTool', cmdSwitchTool),
-    vscode.commands.registerCommand('claude-sessions.useClaude', cmdUseClaude),
-    vscode.commands.registerCommand('claude-sessions.useCodex', cmdUseCodex),
   );
 }
 

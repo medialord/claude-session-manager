@@ -2,7 +2,7 @@
   "name": "claude-session-manager",
   "displayName": "Claude Session Manager",
   "description": "Named session manager for Claude Code and Codex CLI — save, name, and resume sessions from a sidebar panel",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "publisher": "conglyu",
   "license": "MIT",
   "repository": {
@@ -112,28 +112,13 @@
         "command": "claude-sessions.switchTool",
         "title": "Switch Tool (Claude ↔ Codex)",
         "icon": "$(arrow-swap)"
-      },
-      {
-        "command": "claude-sessions.useClaude",
-        "title": "Switch to Claude",
-        "icon": "$(comment)"
-      },
-      {
-        "command": "claude-sessions.useCodex",
-        "title": "Switch to Codex",
-        "icon": "$(symbol-method)"
       }
     ],
     "menus": {
       "view/title": [
         {
-          "command": "claude-sessions.useCodex",
-          "when": "view == claudeSessionsNamed && claudeSessionManager.activeTool == claude",
-          "group": "navigation@1"
-        },
-        {
-          "command": "claude-sessions.useClaude",
-          "when": "view == claudeSessionsNamed && claudeSessionManager.activeTool == codex",
+          "command": "claude-sessions.switchTool",
+          "when": "view == claudeSessionsNamed || view == claudeSessionsRecent",
           "group": "navigation@1"
         },
         {
@@ -178,16 +163,6 @@
           "when": "viewItem == named-claude || viewItem == unnamed-claude || viewItem == named-codex || viewItem == unnamed-codex",
           "group": "navigation@4"
         }
-      ],
-      "commandPalette": [
-        {
-          "command": "claude-sessions.useClaude",
-          "when": "false"
-        },
-        {
-          "command": "claude-sessions.useCodex",
-          "when": "false"
-        }
       ]
     }
   },
@@ -195,7 +170,7 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "package": "vsce package",
-    "install-extension": "code --install-extension claude-session-manager-1.2.0.vsix"
+    "install-extension": "code --install-extension claude-session-manager-1.2.1.vsix"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
