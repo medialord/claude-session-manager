@@ -2,7 +2,7 @@
   "name": "claude-session-manager",
   "displayName": "Claude Session Manager",
   "description": "Named session manager for Claude Code and Codex CLI — save, name, and resume sessions from a sidebar panel",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "publisher": "conglyu",
   "license": "MIT",
   "repository": {
@@ -30,9 +30,7 @@
   ],
   "activationEvents": [
     "onView:claudeSessionsNamed",
-    "onView:claudeSessionsRecent",
-    "onView:codexSessionsNamed",
-    "onView:codexSessionsRecent"
+    "onView:claudeSessionsRecent"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -64,23 +62,13 @@
       "claude-sessions": [
         {
           "id": "claudeSessionsNamed",
-          "name": "Claude · Named",
-          "contextualTitle": "Claude · Named"
+          "name": "Named",
+          "contextualTitle": "Named Sessions"
         },
         {
           "id": "claudeSessionsRecent",
-          "name": "Claude · Recent",
-          "contextualTitle": "Claude · Recent"
-        },
-        {
-          "id": "codexSessionsNamed",
-          "name": "Codex · Named",
-          "contextualTitle": "Codex · Named"
-        },
-        {
-          "id": "codexSessionsRecent",
-          "name": "Codex · Recent",
-          "contextualTitle": "Codex · Recent"
+          "name": "Recent",
+          "contextualTitle": "Recent Sessions"
         }
       ]
     },
@@ -93,11 +81,6 @@
       {
         "command": "claude-sessions.nameSession",
         "title": "Name This Session",
-        "icon": "$(edit)"
-      },
-      {
-        "command": "claude-sessions.nameSessionCodex",
-        "title": "Name This Codex Session",
         "icon": "$(edit)"
       },
       {
@@ -124,24 +107,44 @@
         "command": "claude-sessions.openSessionFolder",
         "title": "Open Session File",
         "icon": "$(folder-opened)"
+      },
+      {
+        "command": "claude-sessions.switchTool",
+        "title": "Switch Tool (Claude ↔ Codex)",
+        "icon": "$(arrow-swap)"
+      },
+      {
+        "command": "claude-sessions.useClaude",
+        "title": "Switch to Claude",
+        "icon": "$(comment)"
+      },
+      {
+        "command": "claude-sessions.useCodex",
+        "title": "Switch to Codex",
+        "icon": "$(symbol-method)"
       }
     ],
     "menus": {
       "view/title": [
         {
+          "command": "claude-sessions.useCodex",
+          "when": "view == claudeSessionsNamed && claudeSessionManager.activeTool == claude",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claude-sessions.useClaude",
+          "when": "view == claudeSessionsNamed && claudeSessionManager.activeTool == codex",
+          "group": "navigation@1"
+        },
+        {
           "command": "claude-sessions.refresh",
-          "when": "view == claudeSessionsNamed || view == claudeSessionsRecent || view == codexSessionsNamed || view == codexSessionsRecent",
-          "group": "navigation"
+          "when": "view == claudeSessionsNamed || view == claudeSessionsRecent",
+          "group": "navigation@2"
         },
         {
           "command": "claude-sessions.nameSession",
           "when": "view == claudeSessionsRecent",
-          "group": "navigation"
-        },
-        {
-          "command": "claude-sessions.nameSessionCodex",
-          "when": "view == codexSessionsRecent",
-          "group": "navigation"
+          "group": "navigation@3"
         }
       ],
       "view/item/context": [
@@ -175,6 +178,16 @@
           "when": "viewItem == named-claude || viewItem == unnamed-claude || viewItem == named-codex || viewItem == unnamed-codex",
           "group": "navigation@4"
         }
+      ],
+      "commandPalette": [
+        {
+          "command": "claude-sessions.useClaude",
+          "when": "false"
+        },
+        {
+          "command": "claude-sessions.useCodex",
+          "when": "false"
+        }
       ]
     }
   },
@@ -182,7 +195,7 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "package": "vsce package",
-    "install-extension": "code --install-extension claude-session-manager-1.1.0.vsix"
+    "install-extension": "code --install-extension claude-session-manager-1.2.0.vsix"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",

@@ -8,6 +8,7 @@ const HOME = os.homedir();
 const NAMES_FILE = path.join(HOME, '.claude', 'session-names.json');
 const CLAUDE_PROJECTS_DIR = path.join(HOME, '.claude', 'projects');
 const CODEX_SESSIONS_DIR = path.join(HOME, '.codex', 'sessions');
+const ACTIVE_TOOL_KEY = 'claudeSessionManager.activeTool';
 
 type Tool = 'claude' | 'codex';
 
@@ -127,11 +128,9 @@ function extractCodexTitle(filePath: string): string {
       if (!line.trim()) { continue; }
       let d: any;
       try { d = JSON.parse(line); } catch { continue; }
-      // Prefer event_msg user_message — that's the actual user-typed input
       if (d.type === 'event_msg' && d.payload?.type === 'user_message') {
         const t = String(d.payload.message ?? '').trim();
         if (!t) { continue; }
-        // Skip auto-injected AGENTS.md / instructions
         if (t.startsWith('# AGENTS.md') || t.startsWith('<INSTRUCTIONS')) { continue; }
         return truncate(t);
       }
@@ -170,7 +169,6 @@ function getCodexSessionId(filePath: string): string | null {
       return String(meta.payload.id);
     }
   } catch { /* fallthrough */ }
-  // Fallback: parse from filename: rollout-<ts>-<uuid>.jsonl
   const m = path.basename(filePath).match(/rollout-[\dT:\-.]+-([0-9a-f-]+)\.jsonl$/);
   return m ? m[1] : null;
 }
@@ -189,7 +187,6 @@ function getAllSessions(tool: Tool): SessionInfo[] {
       const full = path.join(projDir, f);
       const stat = fs.statSync(full);
       const named = names[sessionId];
-      // Treat legacy entries (no tool field) as claude
       const namedForTool = named && (named.tool ?? 'claude') === 'claude' ? named : undefined;
       sessions.push({
         sessionId,
@@ -260,20 +257,20 @@ class SessionItem extends vscode.TreeItem {
   }
 }
 
-// ---- Tree data provider (parameterized) ----
+// ---- Tree data provider ----
 
 class SessionsProvider implements vscode.TreeDataProvider<SessionItem> {
   private _onDidChangeTreeData = new vscode.EventEmitter<SessionItem | undefined>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
-  constructor(private readonly tool: Tool, private readonly mode: 'named' | 'recent') {}
+  constructor(private readonly mode: 'named' | 'recent') {}
 
   refresh(): void { this._onDidChangeTreeData.fire(undefined); }
 
   getTreeItem(element: SessionItem): vscode.TreeItem { return element; }
 
   getChildren(): SessionItem[] {
-    const all = getAllSessions(this.tool);
+    const all = getAllSessions(activeTool);
     const filtered = this.mode === 'named'
       ? all.filter(s => s.isNamed)
       : all.filter(s => !s.isNamed).slice(0, 30);
@@ -281,42 +278,48 @@ class SessionsProvider implements vscode.TreeDataProvider<SessionItem> {
   }
 }
 
+// ---- Globals ----
+
+let activeTool: Tool = 'claude';
+let namedProvider: SessionsProvider;
+let recentProvider: SessionsProvider;
+let namedView: vscode.TreeView<SessionItem>;
+let recentView: vscode.TreeView<SessionItem>;
+let extContext: vscode.ExtensionContext;
+
+function refreshAll(): void {
+  namedProvider.refresh();
+  recentProvider.refresh();
+}
+
+function updateViewTitles(): void {
+  const label = activeTool === 'claude' ? 'Claude' : 'Codex';
+  if (namedView) { namedView.title = `${label} · Named`; }
+  if (recentView) { recentView.title = `${label} · Recent`; }
+}
+
+async function setActiveTool(tool: Tool): Promise<void> {
+  activeTool = tool;
+  await extContext.globalState.update(ACTIVE_TOOL_KEY, tool);
+  await vscode.commands.executeCommand('setContext', 'claudeSessionManager.activeTool', tool);
+  updateViewTitles();
+  refreshAll();
+}
+
 // ---- Commands ----
 
 type SessionArg = { sessionId: string; tool: Tool; name?: string; title: string };
 
-async function cmdNameSession(arg?: SessionArg & { tool?: Tool }): Promise<void> {
-  let tool: Tool = arg?.tool ?? 'claude';
+async function cmdNameSession(arg?: SessionArg): Promise<void> {
+  const tool: Tool = arg?.tool ?? activeTool;
   let targetId = arg?.sessionId;
 
   if (!targetId) {
-    // Picker: ask which tool first if both have unnamed sessions
-    const claudeUnnamed = getAllSessions('claude').filter(s => !s.isNamed);
-    const codexUnnamed = getAllSessions('codex').filter(s => !s.isNamed);
-
-    let unnamed: SessionInfo[];
-    if (claudeUnnamed.length && codexUnnamed.length) {
-      const toolPick = await vscode.window.showQuickPick(
-        [
-          { label: 'Claude', description: `${claudeUnnamed.length} unnamed sessions`, tool: 'claude' as Tool },
-          { label: 'Codex', description: `${codexUnnamed.length} unnamed sessions`, tool: 'codex' as Tool },
-        ],
-        { placeHolder: 'Pick tool' },
-      );
-      if (!toolPick) { return; }
-      tool = toolPick.tool;
-      unnamed = (tool === 'claude' ? claudeUnnamed : codexUnnamed).slice(0, 20);
-    } else if (claudeUnnamed.length) {
-      tool = 'claude';
-      unnamed = claudeUnnamed.slice(0, 20);
-    } else if (codexUnnamed.length) {
-      tool = 'codex';
-      unnamed = codexUnnamed.slice(0, 20);
-    } else {
-      vscode.window.showInformationMessage('No unnamed sessions to name.');
+    const unnamed = getAllSessions(tool).filter(s => !s.isNamed).slice(0, 20);
+    if (unnamed.length === 0) {
+      vscode.window.showInformationMessage(`No unnamed ${tool} sessions to name.`);
       return;
     }
-
     const picks = unnamed.map(s => ({
       label: s.title.slice(0, 80),
       description: new Date(s.mtime).toLocaleString(),
@@ -338,8 +341,7 @@ async function cmdNameSession(arg?: SessionArg & { tool?: Tool }): Promise<void>
   });
   if (!name) { return; }
 
-  const all = getAllSessions(tool);
-  const target = all.find(s => s.sessionId === targetId);
+  const target = getAllSessions(tool).find(s => s.sessionId === targetId);
   const title = target?.title ?? '';
   const names = loadNames();
   names[targetId] = { name: name.trim(), title, tool };
@@ -386,9 +388,7 @@ async function cmdCopyResumeCommand(arg: SessionArg): Promise<void> {
     ? `claude --resume ${arg.sessionId}`
     : `codex resume ${arg.sessionId}`;
   await vscode.env.clipboard.writeText(cmd);
-  vscode.window.showInformationMessage(
-    `Copied: ${cmd.slice(0, 40)}...`
-  );
+  vscode.window.showInformationMessage(`Copied: ${cmd.slice(0, 60)}`);
 }
 
 async function cmdDeleteName(arg: SessionArg): Promise<void> {
@@ -409,8 +409,7 @@ async function cmdDeleteName(arg: SessionArg): Promise<void> {
 
 async function cmdOpenSession(arg: SessionArg): Promise<void> {
   const tool: Tool = arg.tool ?? 'claude';
-  const all = getAllSessions(tool);
-  const target = all.find(s => s.sessionId === arg.sessionId);
+  const target = getAllSessions(tool).find(s => s.sessionId === arg.sessionId);
   if (target && fs.existsSync(target.filePath)) {
     const doc = await vscode.workspace.openTextDocument(target.filePath);
     await vscode.window.showTextDocument(doc);
@@ -419,37 +418,42 @@ async function cmdOpenSession(arg: SessionArg): Promise<void> {
   }
 }
 
-// ---- Globals ----
-
-let providers: SessionsProvider[] = [];
-
-function refreshAll(): void {
-  for (const p of providers) { p.refresh(); }
+async function cmdSwitchTool(): Promise<void> {
+  await setActiveTool(activeTool === 'claude' ? 'codex' : 'claude');
 }
+
+async function cmdUseClaude(): Promise<void> { await setActiveTool('claude'); }
+async function cmdUseCodex(): Promise<void> { await setActiveTool('codex'); }
 
 // ---- Activation ----
 
 export function activate(context: vscode.ExtensionContext): void {
-  const claudeNamed = new SessionsProvider('claude', 'named');
-  const claudeRecent = new SessionsProvider('claude', 'recent');
-  const codexNamed = new SessionsProvider('codex', 'named');
-  const codexRecent = new SessionsProvider('codex', 'recent');
-  providers = [claudeNamed, claudeRecent, codexNamed, codexRecent];
+  extContext = context;
+  const stored = context.globalState.get<Tool>(ACTIVE_TOOL_KEY);
+  activeTool = stored === 'codex' ? 'codex' : 'claude';
 
-  vscode.window.registerTreeDataProvider('claudeSessionsNamed', claudeNamed);
-  vscode.window.registerTreeDataProvider('claudeSessionsRecent', claudeRecent);
-  vscode.window.registerTreeDataProvider('codexSessionsNamed', codexNamed);
-  vscode.window.registerTreeDataProvider('codexSessionsRecent', codexRecent);
+  namedProvider = new SessionsProvider('named');
+  recentProvider = new SessionsProvider('recent');
+
+  namedView = vscode.window.createTreeView('claudeSessionsNamed', { treeDataProvider: namedProvider });
+  recentView = vscode.window.createTreeView('claudeSessionsRecent', { treeDataProvider: recentProvider });
+
+  updateViewTitles();
+  vscode.commands.executeCommand('setContext', 'claudeSessionManager.activeTool', activeTool);
 
   context.subscriptions.push(
+    namedView,
+    recentView,
     vscode.commands.registerCommand('claude-sessions.refresh', refreshAll),
     vscode.commands.registerCommand('claude-sessions.nameSession', cmdNameSession),
-    vscode.commands.registerCommand('claude-sessions.nameSessionCodex', () => cmdNameSession({ tool: 'codex' } as any)),
     vscode.commands.registerCommand('claude-sessions.renameSession', cmdRenameSession),
     vscode.commands.registerCommand('claude-sessions.resumeSession', cmdResumeSession),
     vscode.commands.registerCommand('claude-sessions.copyResumeCommand', cmdCopyResumeCommand),
     vscode.commands.registerCommand('claude-sessions.deleteName', cmdDeleteName),
     vscode.commands.registerCommand('claude-sessions.openSessionFolder', cmdOpenSession),
+    vscode.commands.registerCommand('claude-sessions.switchTool', cmdSwitchTool),
+    vscode.commands.registerCommand('claude-sessions.useClaude', cmdUseClaude),
+    vscode.commands.registerCommand('claude-sessions.useCodex', cmdUseCodex),
   );
 }
 
