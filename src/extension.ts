@@ -310,7 +310,24 @@ async function setActiveTool(tool: Tool): Promise<void> {
 
 type SessionArg = { sessionId: string; tool: Tool; name?: string; title: string };
 
-async function cmdNameSession(arg?: SessionArg): Promise<void> {
+// Normalize: inline buttons/menu pass the TreeItem; tree-item click passes the
+// plain SessionArg we set in command.arguments. Both paths must resolve here.
+function toSessionArg(arg: any): SessionArg | undefined {
+  if (!arg) { return undefined; }
+  if (typeof arg.sessionId === 'string') { return arg as SessionArg; }
+  if (arg.session && typeof arg.session.sessionId === 'string') {
+    return {
+      sessionId: arg.session.sessionId,
+      tool: arg.session.tool,
+      name: arg.session.name,
+      title: arg.session.title,
+    };
+  }
+  return undefined;
+}
+
+async function cmdNameSession(rawArg?: any): Promise<void> {
+  const arg = toSessionArg(rawArg);
   const tool: Tool = arg?.tool ?? activeTool;
   let targetId = arg?.sessionId;
 
@@ -351,7 +368,9 @@ async function cmdNameSession(arg?: SessionArg): Promise<void> {
   vscode.window.showInformationMessage(`Session named: ${name}`);
 }
 
-async function cmdRenameSession(arg: SessionArg): Promise<void> {
+async function cmdRenameSession(rawArg: any): Promise<void> {
+  const arg = toSessionArg(rawArg);
+  if (!arg) { return; }
   const name = await vscode.window.showInputBox({
     prompt: 'Rename this session',
     value: arg.name,
@@ -369,7 +388,9 @@ async function cmdRenameSession(arg: SessionArg): Promise<void> {
   }
 }
 
-async function cmdResumeSession(arg: SessionArg): Promise<void> {
+async function cmdResumeSession(rawArg: any): Promise<void> {
+  const arg = toSessionArg(rawArg);
+  if (!arg) { return; }
   const tool: Tool = arg.tool ?? 'claude';
   const bin = findBinary(tool);
   const cmd = tool === 'claude'
@@ -382,7 +403,9 @@ async function cmdResumeSession(arg: SessionArg): Promise<void> {
   terminal.sendText(cmd);
 }
 
-async function cmdCopyResumeCommand(arg: SessionArg): Promise<void> {
+async function cmdCopyResumeCommand(rawArg: any): Promise<void> {
+  const arg = toSessionArg(rawArg);
+  if (!arg) { return; }
   const tool: Tool = arg.tool ?? 'claude';
   const cmd = tool === 'claude'
     ? `claude --resume ${arg.sessionId}`
@@ -391,7 +414,12 @@ async function cmdCopyResumeCommand(arg: SessionArg): Promise<void> {
   vscode.window.showInformationMessage(`Copied: ${cmd.slice(0, 60)}`);
 }
 
-async function cmdDeleteName(arg: SessionArg): Promise<void> {
+async function cmdDeleteName(rawArg: any): Promise<void> {
+  const arg = toSessionArg(rawArg);
+  if (!arg) {
+    vscode.window.showErrorMessage('Cannot identify session to remove.');
+    return;
+  }
   const name = arg.name || arg.sessionId;
   const confirm = await vscode.window.showWarningMessage(
     `Remove name "${name}"? (session data is preserved)`,
@@ -407,7 +435,9 @@ async function cmdDeleteName(arg: SessionArg): Promise<void> {
   vscode.window.showInformationMessage(`Removed name: ${name}`);
 }
 
-async function cmdOpenSession(arg: SessionArg): Promise<void> {
+async function cmdOpenSession(rawArg: any): Promise<void> {
+  const arg = toSessionArg(rawArg);
+  if (!arg) { return; }
   const tool: Tool = arg.tool ?? 'claude';
   const target = getAllSessions(tool).find(s => s.sessionId === arg.sessionId);
   if (target && fs.existsSync(target.filePath)) {
