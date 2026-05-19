@@ -10,44 +10,40 @@ const CLAUDE_PROJECTS_DIR = path.join(HOME, '.claude', 'projects');
 const CODEX_SESSIONS_DIR = path.join(HOME, '.codex', 'sessions');
 const ACTIVE_TOOL_KEY = 'claudeSessionManager.activeTool';
 
-type Tool = 'claude' | 'codex' | 'auto';
+type Tool = 'claude' | 'codex';
 
-const TOOL_CYCLE: Tool[] = ['claude', 'codex', 'auto'];
+const TOOL_CYCLE: Tool[] = ['claude', 'codex'];
 const TOOL_LABEL: Record<Tool, string> = {
   claude: 'Claude',
   codex: 'Codex',
-  auto: 'Auto',
 };
 
 const TOOL_ITEM_ICON: Record<Tool, string> = {
   claude: 'comment',
   codex: 'symbol-method',
-  auto: 'rocket',
 };
 
 // ---- Binary detection ----
 
 function findBinary(tool: Tool): string {
-  // Auto uses the claude binary with --dangerously-skip-permissions.
-  const binName = tool === 'codex' ? 'codex' : 'claude';
   const config = vscode.workspace.getConfiguration('claudeSessionManager');
-  const configKey = binName === 'claude' ? 'claudePath' : 'codexPath';
+  const configKey = tool === 'claude' ? 'claudePath' : 'codexPath';
   const configured = config.get<string>(configKey);
   if (configured && fs.existsSync(configured)) {
     return configured;
   }
 
   try {
-    const result = execSync(`which ${binName}`, { encoding: 'utf-8', timeout: 3000 }).trim();
+    const result = execSync(`which ${tool}`, { encoding: 'utf-8', timeout: 3000 }).trim();
     if (result && fs.existsSync(result)) {
       return result;
     }
   } catch { /* not in PATH */ }
 
   const commonPaths = [
-    `/opt/homebrew/bin/${binName}`,
-    `/usr/local/bin/${binName}`,
-    path.join(HOME, `.local/bin/${binName}`),
+    `/opt/homebrew/bin/${tool}`,
+    `/usr/local/bin/${tool}`,
+    path.join(HOME, `.local/bin/${tool}`),
   ];
   for (const p of commonPaths) {
     if (fs.existsSync(p)) {
@@ -55,7 +51,7 @@ function findBinary(tool: Tool): string {
     }
   }
 
-  return binName;
+  return tool;
 }
 
 interface SessionNameEntry { name: string; title: string; tool?: Tool }
@@ -192,8 +188,7 @@ function getAllSessions(tool: Tool): SessionInfo[] {
   const names = loadNames();
   const sessions: SessionInfo[] = [];
 
-  if (tool === 'claude' || tool === 'auto') {
-    // Both share the Claude session store; names are filtered per-tool.
+  if (tool === 'claude') {
     const projDir = getClaudeProjectsSubDir();
     if (!projDir) { return []; }
     const files = fs.readdirSync(projDir);
@@ -203,11 +198,10 @@ function getAllSessions(tool: Tool): SessionInfo[] {
       const full = path.join(projDir, f);
       const stat = fs.statSync(full);
       const named = names[sessionId];
-      const entryTool: Tool = (named?.tool ?? 'claude') as Tool;
-      const namedForTool = named && entryTool === tool ? named : undefined;
+      const namedForTool = named && (named.tool ?? 'claude') === 'claude' ? named : undefined;
       sessions.push({
         sessionId,
-        tool,
+        tool: 'claude',
         name: namedForTool?.name,
         title: namedForTool?.title || extractClaudeTitle(full),
         mtime: stat.mtimeMs,
@@ -405,22 +399,37 @@ async function cmdRenameSession(rawArg: any): Promise<void> {
   }
 }
 
-function buildResumeCommand(tool: Tool, bin: string, sessionId: string): string {
+function buildResumeCommand(tool: Tool, bin: string, sessionId: string, auto = false): string {
   if (tool === 'codex') { return `${bin} resume ${sessionId}`; }
-  if (tool === 'auto') { return `${bin} --dangerously-skip-permissions --resume ${sessionId}`; }
+  if (auto) { return `${bin} --dangerously-skip-permissions --resume ${sessionId}`; }
   return `${bin} --resume ${sessionId}`;
+}
+
+function openResumeTerminal(arg: SessionArg, auto: boolean): void {
+  const tool: Tool = arg.tool ?? 'claude';
+  const bin = findBinary(tool);
+  const cmd = buildResumeCommand(tool, bin, arg.sessionId, auto);
+  const labelText = arg.name || arg.title.slice(0, 40);
+  const prefix = auto ? 'Auto' : TOOL_LABEL[tool];
+  const terminal = vscode.window.createTerminal(`${prefix}: ${labelText}`);
+  terminal.show();
+  terminal.sendText(cmd);
 }
 
 async function cmdResumeSession(rawArg: any): Promise<void> {
   const arg = toSessionArg(rawArg);
   if (!arg) { return; }
-  const tool: Tool = arg.tool ?? 'claude';
-  const bin = findBinary(tool);
-  const cmd = buildResumeCommand(tool, bin, arg.sessionId);
-  const label = arg.name || arg.title.slice(0, 40);
-  const terminal = vscode.window.createTerminal(`${TOOL_LABEL[tool]}: ${label}`);
-  terminal.show();
-  terminal.sendText(cmd);
+  openResumeTerminal(arg, false);
+}
+
+async function cmdResumeSessionAuto(rawArg: any): Promise<void> {
+  const arg = toSessionArg(rawArg);
+  if (!arg) { return; }
+  if (arg.tool === 'codex') {
+    vscode.window.showWarningMessage('Auto mode only applies to Claude sessions.');
+    return;
+  }
+  openResumeTerminal(arg, true);
 }
 
 async function cmdCopyResumeCommand(rawArg: any): Promise<void> {
@@ -428,7 +437,7 @@ async function cmdCopyResumeCommand(rawArg: any): Promise<void> {
   if (!arg) { return; }
   const tool: Tool = arg.tool ?? 'claude';
   const binName = tool === 'codex' ? 'codex' : 'claude';
-  const cmd = buildResumeCommand(tool, binName, arg.sessionId);
+  const cmd = buildResumeCommand(tool, binName, arg.sessionId, false);
   await vscode.env.clipboard.writeText(cmd);
   vscode.window.showInformationMessage(`Copied: ${cmd.slice(0, 80)}`);
 }
@@ -497,6 +506,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('claude-sessions.nameSession', cmdNameSession),
     vscode.commands.registerCommand('claude-sessions.renameSession', cmdRenameSession),
     vscode.commands.registerCommand('claude-sessions.resumeSession', cmdResumeSession),
+    vscode.commands.registerCommand('claude-sessions.resumeSessionAuto', cmdResumeSessionAuto),
     vscode.commands.registerCommand('claude-sessions.copyResumeCommand', cmdCopyResumeCommand),
     vscode.commands.registerCommand('claude-sessions.deleteName', cmdDeleteName),
     vscode.commands.registerCommand('claude-sessions.openSessionFolder', cmdOpenSession),
