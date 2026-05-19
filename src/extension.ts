@@ -10,29 +10,44 @@ const CLAUDE_PROJECTS_DIR = path.join(HOME, '.claude', 'projects');
 const CODEX_SESSIONS_DIR = path.join(HOME, '.codex', 'sessions');
 const ACTIVE_TOOL_KEY = 'claudeSessionManager.activeTool';
 
-type Tool = 'claude' | 'codex';
+type Tool = 'claude' | 'codex' | 'auto';
+
+const TOOL_CYCLE: Tool[] = ['claude', 'codex', 'auto'];
+const TOOL_LABEL: Record<Tool, string> = {
+  claude: 'Claude',
+  codex: 'Codex',
+  auto: 'Auto',
+};
+
+const TOOL_ITEM_ICON: Record<Tool, string> = {
+  claude: 'comment',
+  codex: 'symbol-method',
+  auto: 'rocket',
+};
 
 // ---- Binary detection ----
 
 function findBinary(tool: Tool): string {
+  // Auto uses the claude binary with --dangerously-skip-permissions.
+  const binName = tool === 'codex' ? 'codex' : 'claude';
   const config = vscode.workspace.getConfiguration('claudeSessionManager');
-  const configKey = tool === 'claude' ? 'claudePath' : 'codexPath';
+  const configKey = binName === 'claude' ? 'claudePath' : 'codexPath';
   const configured = config.get<string>(configKey);
   if (configured && fs.existsSync(configured)) {
     return configured;
   }
 
   try {
-    const result = execSync(`which ${tool}`, { encoding: 'utf-8', timeout: 3000 }).trim();
+    const result = execSync(`which ${binName}`, { encoding: 'utf-8', timeout: 3000 }).trim();
     if (result && fs.existsSync(result)) {
       return result;
     }
   } catch { /* not in PATH */ }
 
   const commonPaths = [
-    `/opt/homebrew/bin/${tool}`,
-    `/usr/local/bin/${tool}`,
-    path.join(HOME, `.local/bin/${tool}`),
+    `/opt/homebrew/bin/${binName}`,
+    `/usr/local/bin/${binName}`,
+    path.join(HOME, `.local/bin/${binName}`),
   ];
   for (const p of commonPaths) {
     if (fs.existsSync(p)) {
@@ -40,7 +55,7 @@ function findBinary(tool: Tool): string {
     }
   }
 
-  return tool;
+  return binName;
 }
 
 interface SessionNameEntry { name: string; title: string; tool?: Tool }
@@ -177,7 +192,8 @@ function getAllSessions(tool: Tool): SessionInfo[] {
   const names = loadNames();
   const sessions: SessionInfo[] = [];
 
-  if (tool === 'claude') {
+  if (tool === 'claude' || tool === 'auto') {
+    // Both share the Claude session store; names are filtered per-tool.
     const projDir = getClaudeProjectsSubDir();
     if (!projDir) { return []; }
     const files = fs.readdirSync(projDir);
@@ -187,10 +203,11 @@ function getAllSessions(tool: Tool): SessionInfo[] {
       const full = path.join(projDir, f);
       const stat = fs.statSync(full);
       const named = names[sessionId];
-      const namedForTool = named && (named.tool ?? 'claude') === 'claude' ? named : undefined;
+      const entryTool: Tool = (named?.tool ?? 'claude') as Tool;
+      const namedForTool = named && entryTool === tool ? named : undefined;
       sessions.push({
         sessionId,
-        tool: 'claude',
+        tool,
         name: namedForTool?.name,
         title: namedForTool?.title || extractClaudeTitle(full),
         mtime: stat.mtimeMs,
@@ -232,7 +249,7 @@ class SessionItem extends vscode.TreeItem {
     const label = session.name || session.title.slice(0, 60);
     super(label, collapsibleState);
 
-    const toolBadge = session.tool === 'claude' ? 'Claude' : 'Codex';
+    const toolBadge = TOOL_LABEL[session.tool];
     this.tooltip = `${session.name ? '\u2b50 ' + session.name + '\n\n' : ''}${session.title}\n\nTool: ${toolBadge}\nID: ${session.sessionId}\nModified: ${new Date(session.mtime).toLocaleString()}`;
     this.description = new Date(session.mtime).toLocaleDateString();
 
@@ -240,7 +257,7 @@ class SessionItem extends vscode.TreeItem {
       this.iconPath = new vscode.ThemeIcon('star-full', new vscode.ThemeColor('editorWarning.foreground'));
       this.contextValue = `named-${session.tool}`;
     } else {
-      this.iconPath = new vscode.ThemeIcon(session.tool === 'claude' ? 'comment' : 'symbol-method');
+      this.iconPath = new vscode.ThemeIcon(TOOL_ITEM_ICON[session.tool]);
       this.contextValue = `unnamed-${session.tool}`;
     }
 
@@ -293,7 +310,7 @@ function refreshAll(): void {
 }
 
 function updateViewTitles(): void {
-  const label = activeTool === 'claude' ? 'Claude' : 'Codex';
+  const label = TOOL_LABEL[activeTool];
   if (namedView) { namedView.title = `${label} · Named`; }
   if (recentView) { recentView.title = `${label} · Recent`; }
 }
@@ -388,17 +405,20 @@ async function cmdRenameSession(rawArg: any): Promise<void> {
   }
 }
 
+function buildResumeCommand(tool: Tool, bin: string, sessionId: string): string {
+  if (tool === 'codex') { return `${bin} resume ${sessionId}`; }
+  if (tool === 'auto') { return `${bin} --dangerously-skip-permissions --resume ${sessionId}`; }
+  return `${bin} --resume ${sessionId}`;
+}
+
 async function cmdResumeSession(rawArg: any): Promise<void> {
   const arg = toSessionArg(rawArg);
   if (!arg) { return; }
   const tool: Tool = arg.tool ?? 'claude';
   const bin = findBinary(tool);
-  const cmd = tool === 'claude'
-    ? `${bin} --resume ${arg.sessionId}`
-    : `${bin} resume ${arg.sessionId}`;
+  const cmd = buildResumeCommand(tool, bin, arg.sessionId);
   const label = arg.name || arg.title.slice(0, 40);
-  const prefix = tool === 'claude' ? 'Claude' : 'Codex';
-  const terminal = vscode.window.createTerminal(`${prefix}: ${label}`);
+  const terminal = vscode.window.createTerminal(`${TOOL_LABEL[tool]}: ${label}`);
   terminal.show();
   terminal.sendText(cmd);
 }
@@ -407,11 +427,10 @@ async function cmdCopyResumeCommand(rawArg: any): Promise<void> {
   const arg = toSessionArg(rawArg);
   if (!arg) { return; }
   const tool: Tool = arg.tool ?? 'claude';
-  const cmd = tool === 'claude'
-    ? `claude --resume ${arg.sessionId}`
-    : `codex resume ${arg.sessionId}`;
+  const binName = tool === 'codex' ? 'codex' : 'claude';
+  const cmd = buildResumeCommand(tool, binName, arg.sessionId);
   await vscode.env.clipboard.writeText(cmd);
-  vscode.window.showInformationMessage(`Copied: ${cmd.slice(0, 60)}`);
+  vscode.window.showInformationMessage(`Copied: ${cmd.slice(0, 80)}`);
 }
 
 async function cmdDeleteName(rawArg: any): Promise<void> {
@@ -449,9 +468,10 @@ async function cmdOpenSession(rawArg: any): Promise<void> {
 }
 
 async function cmdSwitchTool(): Promise<void> {
-  await setActiveTool(activeTool === 'claude' ? 'codex' : 'claude');
-  const label = activeTool === 'claude' ? 'Claude' : 'Codex';
-  vscode.window.setStatusBarMessage(`Switched to ${label}`, 2000);
+  const idx = TOOL_CYCLE.indexOf(activeTool);
+  const next = TOOL_CYCLE[(idx + 1) % TOOL_CYCLE.length];
+  await setActiveTool(next);
+  vscode.window.setStatusBarMessage(`Switched to ${TOOL_LABEL[next]}`, 2000);
 }
 
 // ---- Activation ----
@@ -459,7 +479,7 @@ async function cmdSwitchTool(): Promise<void> {
 export function activate(context: vscode.ExtensionContext): void {
   extContext = context;
   const stored = context.globalState.get<Tool>(ACTIVE_TOOL_KEY);
-  activeTool = stored === 'codex' ? 'codex' : 'claude';
+  activeTool = TOOL_CYCLE.includes(stored as Tool) ? (stored as Tool) : 'claude';
 
   namedProvider = new SessionsProvider('named');
   recentProvider = new SessionsProvider('recent');
