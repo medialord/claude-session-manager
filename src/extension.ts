@@ -432,6 +432,21 @@ async function cmdResumeSessionAuto(rawArg: any): Promise<void> {
   openResumeTerminal(arg, true);
 }
 
+async function cmdResumeSessionHappy(rawArg: any): Promise<void> {
+  const arg = toSessionArg(rawArg);
+  if (!arg) { return; }
+  const tool: Tool = arg.tool ?? 'claude';
+  // happy wraps claude/codex and bridges the session to phone via slopus/happy.
+  // `happy claude --resume <id>` and `happy codex resume <id>` are both supported.
+  const cmd = tool === 'claude'
+    ? `happy claude --resume ${arg.sessionId}`
+    : `happy codex resume ${arg.sessionId}`;
+  const labelText = arg.name || arg.title.slice(0, 40);
+  const terminal = vscode.window.createTerminal(`Happy ${TOOL_LABEL[tool]}: ${labelText}`);
+  terminal.show();
+  terminal.sendText(cmd);
+}
+
 async function cmdCopyResumeCommand(rawArg: any): Promise<void> {
   const arg = toSessionArg(rawArg);
   if (!arg) { return; }
@@ -507,6 +522,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('claude-sessions.renameSession', cmdRenameSession),
     vscode.commands.registerCommand('claude-sessions.resumeSession', cmdResumeSession),
     vscode.commands.registerCommand('claude-sessions.resumeSessionAuto', cmdResumeSessionAuto),
+    vscode.commands.registerCommand('claude-sessions.resumeSessionHappy', cmdResumeSessionHappy),
     vscode.commands.registerCommand('claude-sessions.copyResumeCommand', cmdCopyResumeCommand),
     vscode.commands.registerCommand('claude-sessions.deleteName', cmdDeleteName),
     vscode.commands.registerCommand('claude-sessions.openSessionFolder', cmdOpenSession),

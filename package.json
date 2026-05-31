@@ -2,7 +2,7 @@
   "name": "claude-session-manager",
   "displayName": "Claude Session Manager",
   "description": "Named session manager for Claude Code and Codex CLI — save, name, and resume sessions from a sidebar panel",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "publisher": "conglyu",
   "license": "MIT",
   "repository": {
@@ -99,6 +99,11 @@
         "icon": "$(rocket)"
       },
       {
+        "command": "claude-sessions.resumeSessionHappy",
+        "title": "Resume in Happy (mobile bridge)",
+        "icon": "$(device-mobile)"
+      },
+      {
         "command": "claude-sessions.deleteName",
         "title": "Remove Name",
         "icon": "$(close)"
@@ -149,14 +154,24 @@
           "group": "inline@2"
         },
         {
+          "command": "claude-sessions.resumeSessionHappy",
+          "when": "viewItem == named-claude || viewItem == unnamed-claude || viewItem == named-codex || viewItem == unnamed-codex",
+          "group": "inline@3"
+        },
+        {
           "command": "claude-sessions.deleteName",
           "when": "viewItem == named-claude || viewItem == named-codex",
-          "group": "inline@3"
+          "group": "inline@4"
         },
         {
           "command": "claude-sessions.resumeSessionAuto",
           "when": "viewItem == named-claude || viewItem == unnamed-claude",
           "group": "navigation@0"
+        },
+        {
+          "command": "claude-sessions.resumeSessionHappy",
+          "when": "viewItem == named-claude || viewItem == unnamed-claude || viewItem == named-codex || viewItem == unnamed-codex",
+          "group": "navigation@01"
         },
         {
           "command": "claude-sessions.renameSession",
@@ -190,7 +205,7 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "package": "vsce package",
-    "install-extension": "code --install-extension claude-session-manager-1.3.1.vsix"
+    "install-extension": "code --install-extension claude-session-manager-1.4.0.vsix"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
