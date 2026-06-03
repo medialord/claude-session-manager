@@ -436,11 +436,20 @@ async function cmdResumeSessionHappy(rawArg: any): Promise<void> {
   const arg = toSessionArg(rawArg);
   if (!arg) { return; }
   const tool: Tool = arg.tool ?? 'claude';
-  // happy wraps claude/codex and bridges the session to phone via slopus/happy.
-  // `happy claude --resume <id>` and `happy codex resume <id>` are both supported.
+
+  // For named sessions, pass an initial prompt that asks the agent to set the
+  // Happy chat title via the mcp__happy__change_title tool. Costs one short
+  // turn, but our name shows up in the mobile client.
+  let titlePrompt = '';
+  if (arg.name) {
+    // Escape double quotes and backslashes for safe embedding in the shell arg
+    const safeName = arg.name.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    titlePrompt = ` "Set this chat title to \\"${safeName}\\" by calling mcp__happy__change_title with title=\\"${safeName}\\". Reply with one line confirming the title was set."`;
+  }
+
   const cmd = tool === 'claude'
-    ? `happy claude --resume ${arg.sessionId}`
-    : `happy codex resume ${arg.sessionId}`;
+    ? `happy claude --resume ${arg.sessionId}${titlePrompt}`
+    : `happy codex resume ${arg.sessionId}${titlePrompt}`;
   const labelText = arg.name || arg.title.slice(0, 40);
   const terminal = vscode.window.createTerminal(`Happy ${TOOL_LABEL[tool]}: ${labelText}`);
   terminal.show();
