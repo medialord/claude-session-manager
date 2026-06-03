@@ -65,23 +65,43 @@ interface SessionInfo {
   mtime: number;
   isNamed: boolean;
   filePath: string;
+  cwd?: string; // original working directory of the session
 }
 
 // ---- Data layer ----
 
-function getClaudeProjectsSubDir(): string {
-  if (!fs.existsSync(CLAUDE_PROJECTS_DIR)) { return ''; }
+function getClaudeProjectsSubDirs(): string[] {
+  if (!fs.existsSync(CLAUDE_PROJECTS_DIR)) { return []; }
   const entries = fs.readdirSync(CLAUDE_PROJECTS_DIR);
+  const dirs: string[] = [];
   for (const e of entries) {
     const full = path.join(CLAUDE_PROJECTS_DIR, e);
-    if (fs.statSync(full).isDirectory()) {
-      const files = fs.readdirSync(full);
-      if (files.some((f: string) => f.endsWith('.jsonl'))) {
-        return full;
+    try {
+      if (fs.statSync(full).isDirectory()) {
+        const files = fs.readdirSync(full);
+        if (files.some((f: string) => f.endsWith('.jsonl'))) {
+          dirs.push(full);
+        }
       }
-    }
+    } catch { /* skip inaccessible */ }
   }
-  return '';
+  return dirs;
+}
+
+// Extract original cwd from a Claude JSONL — first line carrying a `cwd` field.
+function extractClaudeCwd(filePath: string): string | undefined {
+  try {
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const lines = content.split('\n');
+    for (const line of lines) {
+      if (!line.trim() || !line.includes('"cwd"')) { continue; }
+      try {
+        const d = JSON.parse(line);
+        if (typeof d.cwd === 'string' && d.cwd) { return d.cwd; }
+      } catch { /* keep scanning */ }
+    }
+  } catch { /* fall through */ }
+  return undefined;
 }
 
 function loadNames(): SessionNames {
@@ -170,18 +190,21 @@ function listCodexSessionFiles(): string[] {
   return results;
 }
 
-function getCodexSessionId(filePath: string): string | null {
+function getCodexSessionMeta(filePath: string): { sessionId: string | null; cwd?: string } {
   try {
     const content = fs.readFileSync(filePath, 'utf-8');
     const firstNewline = content.indexOf('\n');
     const firstLine = firstNewline === -1 ? content : content.slice(0, firstNewline);
     const meta = JSON.parse(firstLine);
     if (meta.type === 'session_meta' && meta.payload?.id) {
-      return String(meta.payload.id);
+      return {
+        sessionId: String(meta.payload.id),
+        cwd: typeof meta.payload.cwd === 'string' ? meta.payload.cwd : undefined,
+      };
     }
   } catch { /* fallthrough */ }
   const m = path.basename(filePath).match(/rollout-[\dT:\-.]+-([0-9a-f-]+)\.jsonl$/);
-  return m ? m[1] : null;
+  return { sessionId: m ? m[1] : null };
 }
 
 function getAllSessions(tool: Tool): SessionInfo[] {
@@ -189,42 +212,46 @@ function getAllSessions(tool: Tool): SessionInfo[] {
   const sessions: SessionInfo[] = [];
 
   if (tool === 'claude') {
-    const projDir = getClaudeProjectsSubDir();
-    if (!projDir) { return []; }
-    const files = fs.readdirSync(projDir);
-    for (const f of files) {
-      if (!f.endsWith('.jsonl')) { continue; }
-      const sessionId = f.replace('.jsonl', '');
-      const full = path.join(projDir, f);
-      const stat = fs.statSync(full);
-      const named = names[sessionId];
-      const namedForTool = named && (named.tool ?? 'claude') === 'claude' ? named : undefined;
-      sessions.push({
-        sessionId,
-        tool: 'claude',
-        name: namedForTool?.name,
-        title: namedForTool?.title || extractClaudeTitle(full),
-        mtime: stat.mtimeMs,
-        isNamed: !!namedForTool,
-        filePath: full,
-      });
+    const projDirs = getClaudeProjectsSubDirs();
+    if (projDirs.length === 0) { return []; }
+    for (const projDir of projDirs) {
+      const files = fs.readdirSync(projDir);
+      for (const f of files) {
+        if (!f.endsWith('.jsonl')) { continue; }
+        const sessionId = f.replace('.jsonl', '');
+        const full = path.join(projDir, f);
+        const stat = fs.statSync(full);
+        const named = names[sessionId];
+        const namedForTool = named && (named.tool ?? 'claude') === 'claude' ? named : undefined;
+        sessions.push({
+          sessionId,
+          tool: 'claude',
+          name: namedForTool?.name,
+          title: namedForTool?.title || extractClaudeTitle(full),
+          mtime: stat.mtimeMs,
+          isNamed: !!namedForTool,
+          filePath: full,
+          cwd: extractClaudeCwd(full),
+        });
+      }
     }
   } else {
     const files = listCodexSessionFiles();
     for (const full of files) {
-      const sessionId = getCodexSessionId(full);
-      if (!sessionId) { continue; }
+      const meta = getCodexSessionMeta(full);
+      if (!meta.sessionId) { continue; }
       const stat = fs.statSync(full);
-      const named = names[sessionId];
+      const named = names[meta.sessionId];
       const namedForTool = named && named.tool === 'codex' ? named : undefined;
       sessions.push({
-        sessionId,
+        sessionId: meta.sessionId,
         tool: 'codex',
         name: namedForTool?.name,
         title: namedForTool?.title || extractCodexTitle(full),
         mtime: stat.mtimeMs,
         isNamed: !!namedForTool,
         filePath: full,
+        cwd: meta.cwd,
       });
     }
   }
@@ -263,6 +290,7 @@ class SessionItem extends vscode.TreeItem {
         tool: session.tool,
         name: session.name,
         title: session.title,
+        cwd: session.cwd,
       }],
     };
   }
@@ -319,7 +347,7 @@ async function setActiveTool(tool: Tool): Promise<void> {
 
 // ---- Commands ----
 
-type SessionArg = { sessionId: string; tool: Tool; name?: string; title: string };
+type SessionArg = { sessionId: string; tool: Tool; name?: string; title: string; cwd?: string };
 
 // Normalize: inline buttons/menu pass the TreeItem; tree-item click passes the
 // plain SessionArg we set in command.arguments. Both paths must resolve here.
@@ -332,9 +360,20 @@ function toSessionArg(arg: any): SessionArg | undefined {
       tool: arg.session.tool,
       name: arg.session.name,
       title: arg.session.title,
+      cwd: arg.session.cwd,
     };
   }
   return undefined;
+}
+
+function shellQuote(s: string): string {
+  // Wrap in single quotes; escape embedded single quotes the POSIX way.
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+function prefixCd(cwd: string | undefined, cmd: string): string {
+  if (!cwd) { return cmd; }
+  return `cd ${shellQuote(cwd)} && ${cmd}`;
 }
 
 async function cmdNameSession(rawArg?: any): Promise<void> {
@@ -408,10 +447,13 @@ function buildResumeCommand(tool: Tool, bin: string, sessionId: string, auto = f
 function openResumeTerminal(arg: SessionArg, auto: boolean): void {
   const tool: Tool = arg.tool ?? 'claude';
   const bin = findBinary(tool);
-  const cmd = buildResumeCommand(tool, bin, arg.sessionId, auto);
+  const cmd = prefixCd(arg.cwd, buildResumeCommand(tool, bin, arg.sessionId, auto));
   const labelText = arg.name || arg.title.slice(0, 40);
   const prefix = auto ? 'Auto' : TOOL_LABEL[tool];
-  const terminal = vscode.window.createTerminal(`${prefix}: ${labelText}`);
+  const terminal = vscode.window.createTerminal({
+    name: `${prefix}: ${labelText}`,
+    cwd: arg.cwd,
+  });
   terminal.show();
   terminal.sendText(cmd);
 }
@@ -447,11 +489,15 @@ async function cmdResumeSessionHappy(rawArg: any): Promise<void> {
     titlePrompt = ` "Set this chat title to \\"${safeName}\\" by calling mcp__happy__change_title with title=\\"${safeName}\\". Reply with one line confirming the title was set."`;
   }
 
-  const cmd = tool === 'claude'
+  const baseCmd = tool === 'claude'
     ? `happy claude --resume ${arg.sessionId}${titlePrompt}`
     : `happy codex resume ${arg.sessionId}${titlePrompt}`;
+  const cmd = prefixCd(arg.cwd, baseCmd);
   const labelText = arg.name || arg.title.slice(0, 40);
-  const terminal = vscode.window.createTerminal(`Happy ${TOOL_LABEL[tool]}: ${labelText}`);
+  const terminal = vscode.window.createTerminal({
+    name: `Happy ${TOOL_LABEL[tool]}: ${labelText}`,
+    cwd: arg.cwd,
+  });
   terminal.show();
   terminal.sendText(cmd);
 }
