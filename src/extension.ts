@@ -8,7 +8,9 @@ const HOME = os.homedir();
 const NAMES_FILE = path.join(HOME, '.claude', 'session-names.json');
 const CLAUDE_PROJECTS_DIR = path.join(HOME, '.claude', 'projects');
 const CODEX_SESSIONS_DIR = path.join(HOME, '.codex', 'sessions');
+const NAMED_BACKUP_DIR = path.join(HOME, '.claude', 'named-sessions-backup');
 const ACTIVE_TOOL_KEY = 'claudeSessionManager.activeTool';
+const BACKUP_INTERVAL_MS = 5 * 60 * 1000; // periodic re-backup every 5 minutes
 
 type Tool = 'claude' | 'codex';
 
@@ -260,6 +262,184 @@ function getAllSessions(tool: Tool): SessionInfo[] {
   return sessions;
 }
 
+// ---- Named-session backup / restore ----
+
+function copyFileIfChanged(src: string, dest: string): 'copied' | 'skipped' | 'error' {
+  try {
+    const srcStat = fs.statSync(src);
+    if (fs.existsSync(dest)) {
+      const destStat = fs.statSync(dest);
+      if (destStat.mtimeMs >= srcStat.mtimeMs && destStat.size === srcStat.size) {
+        return 'skipped';
+      }
+    }
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.copyFileSync(src, dest);
+    fs.utimesSync(dest, srcStat.atime, srcStat.mtime);
+    return 'copied';
+  } catch {
+    return 'error';
+  }
+}
+
+function copyDirRecursive(src: string, dest: string): void {
+  if (!fs.existsSync(src)) { return; }
+  fs.mkdirSync(dest, { recursive: true });
+  for (const e of fs.readdirSync(src, { withFileTypes: true })) {
+    const s = path.join(src, e.name);
+    const d = path.join(dest, e.name);
+    if (e.isDirectory()) {
+      copyDirRecursive(s, d);
+    } else if (e.isFile()) {
+      copyFileIfChanged(s, d);
+    }
+  }
+}
+
+// Mirror every named (starred) session's JSONL — plus its tool-results
+// sidecar dir — into ~/.claude/named-sessions-backup/<project-dir>/.
+// Survives Claude's periodic archival/strip passes.
+function backupNamedSessions(): { copied: number; skipped: number; errors: number } {
+  let copied = 0, skipped = 0, errors = 0;
+  const stats = { copied, skipped, errors };
+  try {
+    fs.mkdirSync(NAMED_BACKUP_DIR, { recursive: true });
+    const names = loadNames();
+    const namedIds = new Set(Object.keys(names));
+    if (namedIds.size === 0) { return stats; }
+
+    // Claude
+    for (const projDir of getClaudeProjectsSubDirs()) {
+      const projName = path.basename(projDir);
+      for (const f of fs.readdirSync(projDir)) {
+        if (!f.endsWith('.jsonl')) { continue; }
+        const sid = f.replace('.jsonl', '');
+        const entry = names[sid];
+        if (!entry || (entry.tool ?? 'claude') !== 'claude') { continue; }
+        const src = path.join(projDir, f);
+        const dest = path.join(NAMED_BACKUP_DIR, 'claude', projName, f);
+        const result = copyFileIfChanged(src, dest);
+        if (result === 'copied') { stats.copied++; }
+        else if (result === 'skipped') { stats.skipped++; }
+        else { stats.errors++; }
+        // Mirror tool-results sidecar dir if present
+        const trSrc = path.join(projDir, sid, 'tool-results');
+        if (fs.existsSync(trSrc)) {
+          const trDest = path.join(NAMED_BACKUP_DIR, 'claude', projName, sid, 'tool-results');
+          copyDirRecursive(trSrc, trDest);
+        }
+      }
+    }
+
+    // Codex
+    if (fs.existsSync(CODEX_SESSIONS_DIR)) {
+      for (const full of listCodexSessionFiles()) {
+        const meta = getCodexSessionMeta(full);
+        if (!meta.sessionId) { continue; }
+        const entry = names[meta.sessionId];
+        if (!entry || entry.tool !== 'codex') { continue; }
+        // Mirror date-bucketed structure: YYYY/MM/DD/rollout-*.jsonl
+        const rel = path.relative(CODEX_SESSIONS_DIR, full);
+        const dest = path.join(NAMED_BACKUP_DIR, 'codex', rel);
+        const result = copyFileIfChanged(full, dest);
+        if (result === 'copied') { stats.copied++; }
+        else if (result === 'skipped') { stats.skipped++; }
+        else { stats.errors++; }
+      }
+    }
+  } catch { /* swallow — backup must not break the extension */ }
+  return stats;
+}
+
+// Look in the backup for any named session that's missing from the live store
+// and copy it back. Returns the list of restored session IDs.
+function restoreMissingNamedSessions(): { restored: string[]; alreadyLive: number; backupMissing: string[] } {
+  const restored: string[] = [];
+  const backupMissing: string[] = [];
+  let alreadyLive = 0;
+  const names = loadNames();
+
+  // Build set of live session IDs across the two stores
+  const liveClaude = new Set<string>();
+  for (const projDir of getClaudeProjectsSubDirs()) {
+    try {
+      for (const f of fs.readdirSync(projDir)) {
+        if (f.endsWith('.jsonl')) { liveClaude.add(f.replace('.jsonl', '')); }
+      }
+    } catch { /* ignore */ }
+  }
+  const liveCodex = new Set<string>();
+  if (fs.existsSync(CODEX_SESSIONS_DIR)) {
+    for (const full of listCodexSessionFiles()) {
+      const sid = getCodexSessionMeta(full).sessionId;
+      if (sid) { liveCodex.add(sid); }
+    }
+  }
+
+  for (const [sid, entry] of Object.entries(names)) {
+    const tool: Tool = (entry.tool ?? 'claude') as Tool;
+    const isLive = tool === 'claude' ? liveClaude.has(sid) : liveCodex.has(sid);
+    if (isLive) { alreadyLive++; continue; }
+
+    if (tool === 'claude') {
+      // Search the claude backup tree for <id>.jsonl
+      const claudeBackupRoot = path.join(NAMED_BACKUP_DIR, 'claude');
+      if (!fs.existsSync(claudeBackupRoot)) { backupMissing.push(sid); continue; }
+      let foundSrc: string | undefined;
+      let foundProjName: string | undefined;
+      for (const projName of fs.readdirSync(claudeBackupRoot)) {
+        const candidate = path.join(claudeBackupRoot, projName, `${sid}.jsonl`);
+        if (fs.existsSync(candidate)) {
+          foundSrc = candidate;
+          foundProjName = projName;
+          break;
+        }
+      }
+      if (!foundSrc || !foundProjName) { backupMissing.push(sid); continue; }
+      const destDir = path.join(CLAUDE_PROJECTS_DIR, foundProjName);
+      const destFile = path.join(destDir, `${sid}.jsonl`);
+      try {
+        fs.mkdirSync(destDir, { recursive: true });
+        fs.copyFileSync(foundSrc, destFile);
+        // Tool-results sidecar
+        const trSrc = path.join(path.dirname(foundSrc), sid, 'tool-results');
+        if (fs.existsSync(trSrc)) {
+          copyDirRecursive(trSrc, path.join(destDir, sid, 'tool-results'));
+        }
+        restored.push(sid);
+      } catch { backupMissing.push(sid); }
+    } else {
+      // Codex: search backup tree for rollout-*<id>*.jsonl
+      const codexBackupRoot = path.join(NAMED_BACKUP_DIR, 'codex');
+      if (!fs.existsSync(codexBackupRoot)) { backupMissing.push(sid); continue; }
+      let foundSrc: string | undefined;
+      let foundRel: string | undefined;
+      const walk = (dir: string): void => {
+        if (foundSrc) { return; }
+        for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+          if (foundSrc) { return; }
+          const full = path.join(dir, e.name);
+          if (e.isDirectory()) { walk(full); }
+          else if (e.isFile() && e.name.includes(sid) && e.name.endsWith('.jsonl')) {
+            foundSrc = full;
+            foundRel = path.relative(codexBackupRoot, full);
+          }
+        }
+      };
+      try { walk(codexBackupRoot); } catch { /* ignore */ }
+      if (!foundSrc || !foundRel) { backupMissing.push(sid); continue; }
+      const destFile = path.join(CODEX_SESSIONS_DIR, foundRel);
+      try {
+        fs.mkdirSync(path.dirname(destFile), { recursive: true });
+        fs.copyFileSync(foundSrc, destFile);
+        restored.push(sid);
+      } catch { backupMissing.push(sid); }
+    }
+  }
+
+  return { restored, alreadyLive, backupMissing };
+}
+
 // ---- Tree items ----
 
 class SessionItem extends vscode.TreeItem {
@@ -415,6 +595,8 @@ async function cmdNameSession(rawArg?: any): Promise<void> {
   saveNames(names);
 
   refreshAll();
+  // New favorite — back it up right now so a future archive can't lose it
+  backupNamedSessions();
   vscode.window.showInformationMessage(`Session named: ${name}`);
 }
 
@@ -546,6 +728,23 @@ async function cmdOpenSession(rawArg: any): Promise<void> {
   }
 }
 
+async function cmdBackupNamedSessions(): Promise<void> {
+  const r = backupNamedSessions();
+  vscode.window.showInformationMessage(
+    `Named sessions backed up: ${r.copied} new/changed, ${r.skipped} unchanged${r.errors ? `, ${r.errors} errors` : ''}.`,
+  );
+}
+
+async function cmdRestoreMissingNamed(): Promise<void> {
+  const r = restoreMissingNamedSessions();
+  const parts: string[] = [];
+  if (r.restored.length) { parts.push(`Restored ${r.restored.length}`); }
+  if (r.alreadyLive) { parts.push(`${r.alreadyLive} already live`); }
+  if (r.backupMissing.length) { parts.push(`${r.backupMissing.length} not in backup`); }
+  vscode.window.showInformationMessage(`Restore done: ${parts.join(' · ') || 'nothing to do'}.`);
+  refreshAll();
+}
+
 async function cmdSwitchTool(): Promise<void> {
   const idx = TOOL_CYCLE.indexOf(activeTool);
   const next = TOOL_CYCLE[(idx + 1) % TOOL_CYCLE.length];
@@ -582,7 +781,15 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('claude-sessions.deleteName', cmdDeleteName),
     vscode.commands.registerCommand('claude-sessions.openSessionFolder', cmdOpenSession),
     vscode.commands.registerCommand('claude-sessions.switchTool', cmdSwitchTool),
+    vscode.commands.registerCommand('claude-sessions.backupNamed', cmdBackupNamedSessions),
+    vscode.commands.registerCommand('claude-sessions.restoreMissing', cmdRestoreMissingNamed),
   );
+
+  // Auto-backup on activation, then every BACKUP_INTERVAL_MS.
+  // Run the first pass async so activation isn't blocked.
+  setTimeout(() => { backupNamedSessions(); }, 2000);
+  const interval = setInterval(() => { backupNamedSessions(); }, BACKUP_INTERVAL_MS);
+  context.subscriptions.push({ dispose: () => clearInterval(interval) });
 }
 
 export function deactivate(): void {}
