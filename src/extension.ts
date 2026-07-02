@@ -25,7 +25,9 @@ const TOOL_ITEM_ICON: Record<Tool, string> = {
   codex: 'symbol-method',
 };
 
-// ---- Binary detection ----
+// ---- Binary detection (cross-platform) ----
+
+const IS_WINDOWS = process.platform === 'win32';
 
 function findBinary(tool: Tool): string {
   const config = vscode.workspace.getConfiguration('claudeSessionManager');
@@ -35,20 +37,31 @@ function findBinary(tool: Tool): string {
     return configured;
   }
 
+  // Use `where` on Windows, `which` on Unix. `where` may print multiple lines.
   try {
-    const result = execSync(`which ${tool}`, { encoding: 'utf-8', timeout: 3000 }).trim();
+    const lookup = IS_WINDOWS ? `where ${tool}` : `which ${tool}`;
+    const result = execSync(lookup, { encoding: 'utf-8', timeout: 3000 })
+      .split(/\r?\n/)[0]
+      .trim();
     if (result && fs.existsSync(result)) {
       return result;
     }
   } catch { /* not in PATH */ }
 
-  const commonPaths = [
-    `/opt/homebrew/bin/${tool}`,
-    `/usr/local/bin/${tool}`,
-    path.join(HOME, `.local/bin/${tool}`),
-  ];
+  // Fallback: platform-specific well-known install paths
+  const commonPaths = IS_WINDOWS
+    ? [
+        path.join(process.env['APPDATA'] || '', 'npm', `${tool}.cmd`),
+        path.join(process.env['LOCALAPPDATA'] || '', 'Programs', tool, `${tool}.exe`),
+        path.join(process.env['ProgramFiles'] || 'C:\\Program Files', tool, `${tool}.exe`),
+      ]
+    : [
+        `/opt/homebrew/bin/${tool}`,
+        `/usr/local/bin/${tool}`,
+        path.join(HOME, `.local/bin/${tool}`),
+      ];
   for (const p of commonPaths) {
-    if (fs.existsSync(p)) {
+    if (p && fs.existsSync(p)) {
       return p;
     }
   }
@@ -547,13 +560,20 @@ function toSessionArg(arg: any): SessionArg | undefined {
 }
 
 function shellQuote(s: string): string {
-  // Wrap in single quotes; escape embedded single quotes the POSIX way.
+  if (IS_WINDOWS) {
+    // Windows: wrap in double quotes and escape embedded ones
+    return `"${s.replace(/"/g, '""')}"`;
+  }
+  // POSIX: single-quote, escape embedded single quotes
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
 function prefixCd(cwd: string | undefined, cmd: string): string {
   if (!cwd) { return cmd; }
-  return `cd ${shellQuote(cwd)} && ${cmd}`;
+  // Terminal is spawned with cwd already set, but the prefix is belt-and-
+  // suspenders. On Windows use `;` (works in PowerShell 5.1+); on Unix `&&`.
+  const sep = IS_WINDOWS ? ';' : '&&';
+  return `cd ${shellQuote(cwd)} ${sep} ${cmd}`;
 }
 
 async function cmdNameSession(rawArg?: any): Promise<void> {
