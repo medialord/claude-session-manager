@@ -135,27 +135,27 @@ function truncate(s: string, n = 120): string {
   return s.length > n ? s.slice(0, n) + '\u2026' : s;
 }
 
-// Text patterns that indicate an auto-generated slash-command prompt rather
-// than a real user message. When the first user message matches any of these,
-// keep scanning for the next real message.
-const SLASH_COMMAND_TITLE_PATTERNS: RegExp[] = [
+// Text patterns for messages that are pure XML metadata wrappers (not real
+// content). We skip these completely and keep scanning.
+const METADATA_PATTERNS: RegExp[] = [
   /^<command-/i,
   /^<local-command-/i,
   /^Caveat: The messages below were/i,
-  /^Analyze this codebase/i,
-  /^Analyze test coverage/i,
-  /^Analyze the repository/i,
-  /^Complete a security review/i,
-  /^Review a pull request/i,
-  /^Initialize a new CLAUDE\.md/i,
-  /^Please analyze this codebase/i,
-  /^You are/i,
 ];
 
-function isSlashCommandTemplate(t: string): boolean {
+// Grab only the first non-empty line, drop trailing colons/dashes so slash
+// command headers like "Analyze this codebase for security vulnerabilities:"
+// don't cost extra characters in the sidebar.
+function firstMeaningfulLine(t: string): string {
+  const trimmed = t.trim();
+  const firstLine = trimmed.split(/\r?\n/).find((l) => l.trim().length > 0) ?? trimmed;
+  return firstLine.trim().replace(/[:\-\s]+$/, '');
+}
+
+function isPureMetadata(t: string): boolean {
   const trimmed = t.trim();
   if (!trimmed) { return true; }
-  return SLASH_COMMAND_TITLE_PATTERNS.some((p) => p.test(trimmed));
+  return METADATA_PATTERNS.some((p) => p.test(trimmed));
 }
 
 function extractClaudeTitle(filePath: string): string {
@@ -163,9 +163,6 @@ function extractClaudeTitle(filePath: string): string {
   try {
     const content = fs.readFileSync(filePath, 'utf-8');
     const lines = content.split('\n');
-    // Scan up to first N user messages so we can walk past slash-command
-    // auto-expansions and settle on the first real human-authored line.
-    let scanned = 0;
     for (const line of lines) {
       if (!line.trim()) { continue; }
       let d: any;
@@ -184,14 +181,10 @@ function extractClaudeTitle(filePath: string): string {
         text = msg.trim();
       }
       if (!text) { continue; }
-      if (isSlashCommandTemplate(text)) {
-        scanned++;
-        if (scanned > 20) { break; } // give up
-        continue;
-      }
-      return truncate(text);
+      if (isPureMetadata(text)) { continue; }
+      return truncate(firstMeaningfulLine(text));
     }
-    return '(slash command)';
+    return '(empty)';
   } catch {
     return '(error)';
   }

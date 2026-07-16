@@ -2,7 +2,7 @@
   "name": "claude-session-manager",
   "displayName": "Claude Session Manager",
   "description": "Named session manager for Claude Code and Codex CLI — save, name, and resume sessions from a sidebar panel",
-  "version": "1.7.1",
+  "version": "1.7.2",
   "publisher": "conglyu",
   "license": "MIT",
   "repository": {
@@ -215,7 +215,7 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "package": "vsce package",
-    "install-extension": "code --install-extension claude-session-manager-1.7.1.vsix"
+    "install-extension": "code --install-extension claude-session-manager-1.7.2.vsix"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
