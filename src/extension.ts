@@ -135,31 +135,63 @@ function truncate(s: string, n = 120): string {
   return s.length > n ? s.slice(0, n) + '\u2026' : s;
 }
 
+// Text patterns that indicate an auto-generated slash-command prompt rather
+// than a real user message. When the first user message matches any of these,
+// keep scanning for the next real message.
+const SLASH_COMMAND_TITLE_PATTERNS: RegExp[] = [
+  /^<command-/i,
+  /^<local-command-/i,
+  /^Caveat: The messages below were/i,
+  /^Analyze this codebase/i,
+  /^Analyze test coverage/i,
+  /^Analyze the repository/i,
+  /^Complete a security review/i,
+  /^Review a pull request/i,
+  /^Initialize a new CLAUDE\.md/i,
+  /^Please analyze this codebase/i,
+  /^You are/i,
+];
+
+function isSlashCommandTemplate(t: string): boolean {
+  const trimmed = t.trim();
+  if (!trimmed) { return true; }
+  return SLASH_COMMAND_TITLE_PATTERNS.some((p) => p.test(trimmed));
+}
+
 function extractClaudeTitle(filePath: string): string {
   if (!fs.existsSync(filePath)) { return '(unknown)'; }
   try {
     const content = fs.readFileSync(filePath, 'utf-8');
     const lines = content.split('\n');
+    // Scan up to first N user messages so we can walk past slash-command
+    // auto-expansions and settle on the first real human-authored line.
+    let scanned = 0;
     for (const line of lines) {
       if (!line.trim()) { continue; }
-      const d = JSON.parse(line);
-      if (d.type === 'user') {
-        const msg = d.message?.content ?? '';
-        if (Array.isArray(msg)) {
-          for (const item of msg) {
-            if (item.type === 'text') {
-              const t = item.text.trim();
-              if (t.includes('<local-command')) { continue; }
-              return truncate(t);
-            }
+      let d: any;
+      try { d = JSON.parse(line); } catch { continue; }
+      if (d.type !== 'user') { continue; }
+      const msg = d.message?.content ?? '';
+      let text = '';
+      if (Array.isArray(msg)) {
+        for (const item of msg) {
+          if (item?.type === 'text' && typeof item.text === 'string') {
+            text = item.text.trim();
+            break;
           }
-        } else if (typeof msg === 'string') {
-          return truncate(msg);
         }
-        break;
+      } else if (typeof msg === 'string') {
+        text = msg.trim();
       }
+      if (!text) { continue; }
+      if (isSlashCommandTemplate(text)) {
+        scanned++;
+        if (scanned > 20) { break; } // give up
+        continue;
+      }
+      return truncate(text);
     }
-    return '(empty)';
+    return '(slash command)';
   } catch {
     return '(error)';
   }
