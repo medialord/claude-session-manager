@@ -81,6 +81,7 @@ interface SessionInfo {
   isNamed: boolean;
   filePath: string;
   cwd?: string; // original working directory of the session
+  isTemplateOnly?: boolean; // slash-command auto-run with no human input
 }
 
 // ---- Data layer ----
@@ -142,6 +143,60 @@ const METADATA_PATTERNS: RegExp[] = [
   /^<local-command-/i,
   /^Caveat: The messages below were/i,
 ];
+
+// Slash-command auto-expanded prompts. Sessions that ONLY contain these
+// (plus metadata) are pure automated runs — no human ever typed anything.
+// Hide them from Recent so the list stays useful.
+const AUTO_TEMPLATE_PATTERNS: RegExp[] = [
+  /^Analyze this codebase for security vulnerabilities/i,
+  /^Analyze this codebase for performance optimizations/i,
+  /^Analyze test coverage and identify gaps/i,
+  /^Analyze this codebase/i,
+  /^Analyze test coverage/i,
+  /^Complete a security review/i,
+  /^Review a pull request/i,
+  /^Initialize a new CLAUDE\.md/i,
+  /^Please analyze this codebase/i,
+];
+
+function isAutoTemplate(t: string): boolean {
+  return AUTO_TEMPLATE_PATTERNS.some((p) => p.test(t.trim()));
+}
+
+// True if every user message in the file is either metadata or a slash-command
+// auto-template — i.e. nobody actually typed anything.
+function isTemplateOnlyClaudeSession(filePath: string): boolean {
+  try {
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const lines = content.split('\n');
+    for (const line of lines) {
+      if (!line.trim()) { continue; }
+      let d: any;
+      try { d = JSON.parse(line); } catch { continue; }
+      if (d.type !== 'user') { continue; }
+      const msg = d.message?.content ?? '';
+      let text = '';
+      if (Array.isArray(msg)) {
+        for (const item of msg) {
+          if (item?.type === 'text' && typeof item.text === 'string') {
+            text = item.text.trim();
+            break;
+          }
+        }
+      } else if (typeof msg === 'string') {
+        text = msg.trim();
+      }
+      if (!text) { continue; }
+      if (isPureMetadata(text)) { continue; }
+      if (isAutoTemplate(text)) { continue; }
+      // Found a real human-typed message
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // Grab only the first non-empty line, drop trailing colons/dashes so slash
 // command headers like "Analyze this codebase for security vulnerabilities:"
@@ -272,6 +327,7 @@ function getAllSessions(tool: Tool): SessionInfo[] {
           isNamed: !!namedForTool,
           filePath: full,
           cwd: extractClaudeCwd(full),
+          isTemplateOnly: !namedForTool && isTemplateOnlyClaudeSession(full),
         });
       }
     }
@@ -530,7 +586,7 @@ class SessionsProvider implements vscode.TreeDataProvider<SessionItem> {
     const all = getAllSessions(activeTool);
     const filtered = this.mode === 'named'
       ? all.filter(s => s.isNamed)
-      : all.filter(s => !s.isNamed).slice(0, 30);
+      : all.filter(s => !s.isNamed && !s.isTemplateOnly).slice(0, 30);
     return filtered.map(s => new SessionItem(s, vscode.TreeItemCollapsibleState.None));
   }
 }
