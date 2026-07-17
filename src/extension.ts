@@ -218,6 +218,10 @@ function extractClaudeTitle(filePath: string): string {
   try {
     const content = fs.readFileSync(filePath, 'utf-8');
     const lines = content.split('\n');
+    // Collect up to 5 non-metadata, non-auto-template user messages, then pick
+    // the best title from them. Short greetings like "hi" / "Poptale" get
+    // improved by later, meatier lines that describe what the session is about.
+    const candidates: string[] = [];
     for (const line of lines) {
       if (!line.trim()) { continue; }
       let d: any;
@@ -237,9 +241,17 @@ function extractClaudeTitle(filePath: string): string {
       }
       if (!text) { continue; }
       if (isPureMetadata(text)) { continue; }
-      return truncate(firstMeaningfulLine(text));
+      if (isAutoTemplate(text)) { continue; }
+      candidates.push(firstMeaningfulLine(text));
+      if (candidates.length >= 5) { break; }
     }
-    return '(empty)';
+    if (candidates.length === 0) { return '(empty)'; }
+    // Prefer the first candidate that is descriptive (≥ 8 chars). Otherwise
+    // use the longest of the first 5 so a "hi" opener falls through to a real
+    // question that arrived a few turns later.
+    const meaty = candidates.find((c) => c.length >= 8);
+    const chosen = meaty ?? candidates.reduce((a, b) => (b.length > a.length ? b : a));
+    return truncate(chosen);
   } catch {
     return '(error)';
   }
